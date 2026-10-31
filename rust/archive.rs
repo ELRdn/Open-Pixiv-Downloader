@@ -707,6 +707,16 @@ impl Archive {
                 writer.invalidate("frames.zip", &error.to_string())?;
                 return Err(error);
             }
+            if let Some(entry) = writer.expected.get_mut("frames.zip") {
+                entry["payload_verified"] = json!(true);
+            }
+            if let Some(entry) = writer
+                .files
+                .iter_mut()
+                .find(|entry| entry["path"] == "frames.zip")
+            {
+                entry["payload_verified"] = json!(true);
+            }
             writer.json("frames.json", &motion)?;
         } else {
             let content = str_at(&body, "content")?;
@@ -953,8 +963,8 @@ struct WorkWriter<'a> {
     archive: &'a Archive,
     target: &'a Target,
     client: &'a dyn Transport,
-    old: Option<Value>,
     files: Vec<Value>,
+    expected: HashMap<String, Value>,
     omissions: Vec<Value>,
     relations: serde_json::Map<String, Value>,
     http_statuses: HashMap<String, u16>,
@@ -983,6 +993,41 @@ impl<'a> WorkWriter<'a> {
                     .collect()
             })
             .unwrap_or_default();
+        // Keep historical expected bytes even when the current local file is
+        // missing or corrupt and therefore excluded from the verified files list.
+        let mut expected: HashMap<String, Value> = old
+            .as_ref()
+            .and_then(|manifest| manifest["files"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry["path"].as_str()?;
+                entry["source_url"].as_str()?;
+                Some((path.to_owned(), entry.clone()))
+            })
+            .collect();
+        for resource in old
+            .as_ref()
+            .and_then(|manifest| manifest["resources"].as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some(path) = resource["path"].as_str() else {
+                continue;
+            };
+            let Some(hash) = resource["expected_sha256"].as_str() else {
+                continue;
+            };
+            let Some(bytes) = resource["expected_bytes"].as_u64() else {
+                continue;
+            };
+            let Some(url) = resource["expected_source_url"].as_str() else {
+                continue;
+            };
+            expected.entry(path.to_owned()).or_insert_with(
+                || json!({"path":path,"sha256":hash,"bytes":bytes,"source_url":url,"payload_verified":resource["expected_payload_verified"].as_bool().unwrap_or(true)}),
+            );
+        }
         let relations = old
             .as_ref()
             .and_then(|m| m["relations"].as_object())
@@ -1003,8 +1048,8 @@ impl<'a> WorkWriter<'a> {
             archive,
             target,
             client,
-            old,
             files,
+            expected,
             omissions: Vec::new(),
             relations,
             http_statuses,
@@ -1015,6 +1060,16 @@ impl<'a> WorkWriter<'a> {
         let mut entry = json!({"path":relative,"sha256":hash,"bytes":bytes});
         if let Some(url) = url {
             entry["source_url"] = json!(url);
+            if relative == "frames.zip" {
+                // A digest of an unvalidated transfer is not a trusted original.
+                let verified = self.expected.get(relative).is_some_and(|old| {
+                    old["sha256"] == hash
+                        && old["bytes"] == bytes
+                        && old["payload_verified"].as_bool().unwrap_or(true)
+                });
+                entry["payload_verified"] = json!(verified);
+            }
+            self.expected.insert(relative.into(), entry.clone());
         }
         self.files.retain(|entry| entry["path"] != relative);
         self.files.push(entry);
@@ -1084,6 +1139,16 @@ impl<'a> WorkWriter<'a> {
             .push(json!({"resource":resource,"reason":reason}));
     }
     fn invalidate(&mut self, relative: &str, reason: &str) -> Result<()> {
+        // Only an explicitly unverified first transfer can lose its expectation
+        // after semantic validation fails. A previously verified original remains
+        // protected even if refreshed frame metadata no longer agrees with it.
+        if self
+            .expected
+            .get(relative)
+            .is_some_and(|entry| entry["payload_verified"] == false)
+        {
+            self.expected.remove(relative);
+        }
         self.files.retain(|entry| entry["path"] != relative);
         self.omit(relative, reason);
         self.checkpoint("partial", false)
@@ -1098,17 +1163,19 @@ impl<'a> WorkWriter<'a> {
         {
             return Ok(true);
         }
-        // Legacy/crash recovery may have an earlier valid entry outside files.
-        let old = self
-            .old
+        let expected = self.expected.get(relative).cloned();
+        if expected
             .as_ref()
-            .and_then(|m| m["files"].as_array())
-            .and_then(|files| {
-                files
-                    .iter()
-                    .find(|entry| entry["path"] == relative && entry["source_url"] == url)
-            });
-        if old.is_some_and(|entry| {
+            .is_some_and(|entry| entry["source_url"] != url)
+        {
+            let error = invalid("update_needed: material source differs from the saved expected identity; original files were preserved");
+            self.omit(relative, &error.to_string());
+            self.checkpoint("partial", false)?;
+            return Err(error);
+        }
+        // A user may have restored an original after an earlier checkpoint. It is
+        // reusable only when it matches the retained historical digest and size.
+        if expected.as_ref().is_some_and(|entry| {
             fingerprint(&path)
                 .is_ok_and(|(hash, bytes)| entry["sha256"] == hash && entry["bytes"] == bytes)
         }) {
@@ -1116,8 +1183,24 @@ impl<'a> WorkWriter<'a> {
             self.checkpoint("partial", true)?;
             return Ok(true);
         }
-        match self.client.download(url, &path) {
+        // Close the temporary file handle before the transport atomically replaces
+        // its path (required on Windows). A rejected new payload never touches path.
+        fs::create_dir_all(path.parent().unwrap())?;
+        let staging = tempfile::NamedTempFile::new_in(path.parent().unwrap())?.into_temp_path();
+        match self.client.download(url, &staging) {
             Ok(()) => {
+                let (hash, bytes) = fingerprint(&staging)?;
+                if expected
+                    .as_ref()
+                    .is_some_and(|entry| entry["sha256"] != hash || entry["bytes"] != bytes)
+                {
+                    let error = invalid("update_needed: downloaded bytes differ from the saved expected hash or size; original files were preserved");
+                    self.omit(relative, &error.to_string());
+                    self.checkpoint("partial", false)?;
+                    return Err(error);
+                }
+                OpenOptions::new().write(true).open(&staging)?.sync_all()?;
+                fs::rename(&staging, &path)?;
                 self.http_statuses.remove(relative);
                 self.record(relative, Some(url))?;
                 self.checkpoint("partial", true)?;
@@ -1201,6 +1284,13 @@ impl<'a> WorkWriter<'a> {
                         .map(str::to_owned)
                 };
                 let prefix = format!("images/{tag}_{id}.");
+                let url = url.or_else(|| {
+                    self.expected
+                        .iter()
+                        .find(|(path, _)| path.starts_with(&prefix))
+                        .and_then(|(_, entry)| entry["source_url"].as_str())
+                        .map(str::to_owned)
+                });
                 let path = url
                     .as_deref()
                     .and_then(|url| extension(url).ok())
@@ -1233,6 +1323,13 @@ impl<'a> WorkWriter<'a> {
                 }
             }
         }
+        // Corrupt/missing pages or relation metadata must not make us forget a
+        // previously trusted original while its references are being rebuilt.
+        for (path, expected) in &self.expected {
+            if !resources.iter().any(|resource| resource["path"] == *path) {
+                resources.push(json!({"role":"saved_material","path":path,"source_url":expected["source_url"]}));
+            }
+        }
         for resource in &mut resources {
             let path = resource["path"].as_str();
             let complete =
@@ -1244,6 +1341,14 @@ impl<'a> WorkWriter<'a> {
             let last_status = (!complete)
                 .then(|| path.and_then(|path| self.http_statuses.get(path)).copied())
                 .flatten();
+            let expected = path.and_then(|path| self.expected.get(path)).cloned();
+            if let Some(expected) = expected {
+                resource["expected_sha256"] = expected["sha256"].clone();
+                resource["expected_bytes"] = expected["bytes"].clone();
+                resource["expected_source_url"] = expected["source_url"].clone();
+                resource["expected_payload_verified"] =
+                    json!(expected["payload_verified"].as_bool().unwrap_or(true));
+            }
             resource["status"] = json!(if complete {
                 "complete"
             } else if failed {
@@ -1925,6 +2030,152 @@ mod tests {
             assert_eq!(archive.save(&target, &good).unwrap(), "complete");
             assert_eq!(good.requests(), expected, "{target_text}");
         }
+    }
+    #[test]
+    fn changed_bytes_at_same_url_never_replace_the_saved_expected_original() {
+        use base64::Engine;
+        for target_text in ["art:1001", "novel:1004"] {
+            for missing in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let archive = Archive::open(temp.path(), false).unwrap();
+                let target = Target::parse(target_text).unwrap();
+                let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+                assert_eq!(archive.save(&target, &fixture).unwrap(), "complete");
+                let relative = if target.kind == "art" {
+                    "images/0000.png"
+                } else {
+                    "cover.png"
+                };
+                let path = temp
+                    .path()
+                    .join(format!("works/{}/{relative}", target.key()));
+                let original = fs::read(&path).unwrap();
+                let original_hash = format!("{:x}", Sha256::digest(&original));
+                let entry = archive.manifest(&target).unwrap()["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["path"] == relative)
+                    .unwrap()
+                    .clone();
+                let url = entry["source_url"].as_str().unwrap();
+                if missing {
+                    fs::remove_file(&path).unwrap();
+                } else {
+                    fs::write(&path, b"damaged local copy to preserve").unwrap();
+                }
+                let mut changed = original.clone();
+                changed[0] ^= 1; // Same length, different hash, same source URL.
+                let mut data: Value = serde_json::from_str(DEMO).unwrap();
+                data["assets"][url] =
+                    json!(base64::engine::general_purpose::STANDARD.encode(changed));
+                for _ in 0..2 {
+                    let fixture = Fixture::new(&data.to_string(), Arc::default()).unwrap();
+                    assert_eq!(archive.save(&target, &fixture).unwrap(), "failed");
+                    assert_eq!(
+                        fixture.requests(),
+                        1,
+                        "only the untrusted replacement is fetched"
+                    );
+                    if missing {
+                        assert!(!path.exists());
+                    } else {
+                        assert_eq!(fs::read(&path).unwrap(), b"damaged local copy to preserve");
+                    }
+                    assert!(archive
+                        .reason(&target)
+                        .unwrap()
+                        .unwrap()
+                        .contains("update_needed"));
+                    let manifest = archive.manifest(&target).unwrap();
+                    let resource = manifest["resources"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|resource| resource["path"] == relative)
+                        .unwrap();
+                    assert_eq!(resource["expected_sha256"], original_hash);
+                    assert_eq!(resource["expected_bytes"], original.len() as u64);
+                    assert!(!archive.complete(&target).unwrap());
+                }
+                let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+                assert_eq!(archive.save(&target, &fixture).unwrap(), "complete");
+                assert_eq!(fixture.requests(), 1);
+                assert_eq!(fs::read(&path).unwrap(), original);
+            }
+        }
+    }
+    #[test]
+    fn expected_media_identity_survives_missing_pages_metadata_and_multiple_prepares() {
+        use base64::Engine;
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("art:1001").unwrap();
+        let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+        archive.save(&target, &fixture).unwrap();
+        let root = temp.path().join("works/art_1001");
+        let original = fs::read(root.join("images/0000.png")).unwrap();
+        fs::remove_file(root.join("images/0000.png")).unwrap();
+        fs::remove_file(root.join("pages.json")).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                archive.prepare(&target, &fixture).unwrap(),
+                "assets_pending"
+            );
+            let manifest = archive.manifest(&target).unwrap();
+            assert_eq!(
+                manifest["resources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|resource| resource["path"] == "images/0000.png")
+                    .unwrap()["expected_sha256"],
+                format!("{:x}", Sha256::digest(&original))
+            );
+        }
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        let mut changed = original;
+        changed[0] ^= 1;
+        data["assets"]["https://i.pximg.net/synthetic/pixiv-archive-lab/1001_p0.png"] =
+            json!(base64::engine::general_purpose::STANDARD.encode(changed));
+        let bad = Fixture::new(&data.to_string(), Arc::default()).unwrap();
+        assert_eq!(archive.finish(&target, &bad).unwrap(), "failed");
+        assert!(!root.join("images/0000.png").exists());
+    }
+    #[test]
+    fn semantic_zip_mismatch_does_not_discard_a_previously_verified_original() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("art:1003").unwrap();
+        let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+        archive.save(&target, &fixture).unwrap();
+        let root = temp.path().join("works/art_1003");
+        let original = fs::read(root.join("frames.zip")).unwrap();
+        let hash = format!("{:x}", Sha256::digest(&original));
+        fs::remove_file(root.join("frames.json")).unwrap();
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        data["responses"]["/ajax/illust/1003/ugoira_meta"]["frames"][0]["file"] =
+            json!("changed.png");
+        let bad = Fixture::new(&data.to_string(), Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &bad).unwrap(), "failed");
+        let manifest = archive.manifest(&target).unwrap();
+        let resource = manifest["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|resource| resource["path"] == "frames.zip")
+            .unwrap();
+        assert_eq!(resource["expected_sha256"], hash);
+        assert_eq!(resource["expected_payload_verified"], true);
+        assert_eq!(fs::read(root.join("frames.zip")).unwrap(), original);
+        fs::remove_file(root.join("frames.json")).unwrap();
+        let good = Fixture::new(DEMO, Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &good).unwrap(), "complete");
+        assert_eq!(
+            good.requests(),
+            1,
+            "refetch metadata but reuse the verified original ZIP"
+        );
     }
     #[test]
     fn four_formats_resume_repair_and_export() {
