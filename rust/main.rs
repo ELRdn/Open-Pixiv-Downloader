@@ -6,6 +6,7 @@ mod novel;
 mod target;
 mod transport;
 mod tui;
+mod update;
 
 use clap::{Args, Parser, Subcommand};
 use jobs::Options;
@@ -25,6 +26,9 @@ use std::{
     about = "Open Pixiv Downloader — local archive CLI + Ratatui"
 )]
 struct Cli {
+    /// Disable automatic GitHub update checks in the TUI
+    #[arg(long, global = true)]
+    no_update_check: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -102,7 +106,9 @@ fn execute() -> error::Result<i32> {
                 "TUI requires an interactive terminal. Use opixiv --help for CLI commands.",
             ));
         }
-        return tui::run().map(|()| 0);
+        let automatic =
+            !cli.no_update_check && std::env::var_os("OPIXIV_NO_UPDATE_CHECK").is_none();
+        return tui::run(automatic).map(|()| 0);
     }
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();

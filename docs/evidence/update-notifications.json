@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-31",
+  "version": "0.2.0-alpha.3",
+  "platform": "x86_64-unknown-linux-gnu",
+  "rust_tests": {"passed": 34, "failed": 0},
+  "update_check": {
+    "source": "https://raw.githubusercontent.com/ELRdn/Open-Pixiv-Downloader/main/Cargo.toml",
+    "live_manifest_version_observed_before_publication": "0.2.0-alpha.2",
+    "tls_verification": "Enabled; OS trusted certificate store",
+    "mock_http_success_403_redirect": "passed",
+    "malformed_or_wrong_product_manifest": "rejected",
+    "semver_prerelease_and_build_metadata": "passed",
+    "new_version_banner_via_mock_receiver": "passed",
+    "input_during_pending_check": "passed",
+    "cooldown": "passed",
+    "temporary_failure_preserves_available_update": "passed",
+    "update_dialog_does_not_exit_active_downloads": "passed"
+  },
+  "terminal_smoke": {
+    "backend": "real Linux PTY 120x36",
+    "live_background_check": "passed",
+    "demo_save_verify_and_output_buttons": "passed",
+    "F9_update_dialog": "passed",
+    "exit_then_print_fixed_install_command": "passed",
+    "install_command_executed": false
+  },
+  "not_verified": ["Windows native display", "Running the update installer on Windows"]
+}

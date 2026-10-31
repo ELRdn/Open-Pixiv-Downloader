@@ -3,6 +3,7 @@ use crate::{
     error::{invalid, Result},
     jobs::{self, Event, Options},
     target::Target,
+    update,
 };
 use crossterm::{
     event::{
@@ -29,7 +30,7 @@ use std::{
         mpsc, Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -278,6 +279,7 @@ enum Modal {
     Help,
     Confirm,
     Result,
+    Update,
 }
 struct Worker {
     receiver: mpsc::Receiver<Event>,
@@ -326,6 +328,11 @@ struct App {
     total: usize,
     status: String,
     last: Option<Value>,
+    update_status: update::Status,
+    update_receiver: Option<mpsc::Receiver<std::result::Result<semver::Version, String>>>,
+    last_update_check: Option<Instant>,
+    automatic_updates: bool,
+    show_update_command: bool,
 }
 impl Default for App {
     fn default() -> Self {
@@ -351,10 +358,84 @@ impl Default for App {
             total: 0,
             status: "READY".into(),
             last: None,
+            update_status: update::Status::Unchecked,
+            update_receiver: None,
+            last_update_check: None,
+            automatic_updates: false,
+            show_update_command: false,
         }
     }
 }
 impl App {
+    fn check_update(&mut self) {
+        if self.update_receiver.is_some() {
+            return;
+        }
+        if self
+            .last_update_check
+            .is_some_and(|t| t.elapsed() < update::RETRY_INTERVAL)
+        {
+            self.log("更新の再確認は前回から1分後にできます。".into());
+            return;
+        }
+        self.last_update_check = Some(Instant::now());
+        if !matches!(self.update_status, update::Status::Available(_)) {
+            self.update_status = update::Status::Checking;
+        }
+        self.update_receiver = Some(update::background());
+    }
+    fn poll_update(&mut self) {
+        let message = self
+            .update_receiver
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(v) => Some(v),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "更新確認の処理が終了しました。F8で再確認できます。".into(),
+                )),
+            });
+        if let Some(result) = message {
+            self.update_receiver = None;
+            match result {
+                Ok(version) => {
+                    let next = update::Status::from_version(version);
+                    if matches!(next, update::Status::Available(_)) && self.update_status != next {
+                        self.log(format!("{} · F9で更新方法", next.message()));
+                    }
+                    self.update_status = next;
+                }
+                Err(error) => {
+                    if !matches!(self.update_status, update::Status::Available(_)) {
+                        self.update_status = update::Status::Failed(error);
+                    }
+                }
+            }
+        }
+        if self.automatic_updates
+            && self.worker.is_none()
+            && self.update_receiver.is_none()
+            && self
+                .last_update_check
+                .is_some_and(|t| t.elapsed() >= update::CHECK_INTERVAL)
+        {
+            self.check_update();
+        }
+    }
+    fn update_details(&self) -> String {
+        let latest = match &self.update_status {
+            update::Status::Available(v) | update::Status::Current(v) => {
+                format!("GitHubのバージョン: v{v}")
+            }
+            _ => self.update_status.message(),
+        };
+        let error = if let update::Status::Failed(s) = &self.update_status {
+            format!("\n{s}\n")
+        } else {
+            String::new()
+        };
+        format!("{}\n\n現在: v{}\n{latest}\n{error}\n更新は、ツールを終了してPowerShellで1つのコマンドを実行します。\n保存済みの作品は引き続き利用できます。\nリポジトリへの移動やgit pullは不要です。\n\n{}\n\nEsc: この画面を閉じる",self.update_status.message(),env!("CARGO_PKG_VERSION"),if self.worker.is_some(){"保存処理が動いています。終了後にEnterで更新コマンドを表示できます。"}else{"Enter: ツールを終了し、コピー用の更新コマンドを表示"})
+    }
     fn set_row(&mut self, key: String, status: String) {
         let row = WorkRow::new(key, status, self.run_out.as_deref());
         if let Some(old) = self.rows.iter_mut().find(|r| r.key == row.key) {
@@ -567,6 +648,7 @@ impl App {
         });
     }
     fn poll(&mut self) {
+        self.poll_update();
         let mut events: Vec<_> = self
             .worker
             .as_ref()
@@ -716,6 +798,10 @@ impl App {
                     self.modal = Modal::None;
                     self.start("fetch");
                 }
+                KeyCode::Enter if self.modal == Modal::Update && self.worker.is_none() => {
+                    self.show_update_command = true;
+                    return true;
+                }
                 _ => {}
             }
             return false;
@@ -727,6 +813,14 @@ impl App {
         if key.code == KeyCode::F(3) {
             self.modal = Modal::Result;
             self.modal_scroll = 0;
+            return false;
+        }
+        if key.code == KeyCode::F(8) {
+            self.check_update();
+            return false;
+        }
+        if key.code == KeyCode::F(9) {
+            self.modal = Modal::Update;
             return false;
         }
         if key.code == KeyCode::F(6) {
@@ -837,6 +931,16 @@ impl App {
         };
         let point = ratatui::layout::Position::new(event.column, event.row);
         if event.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some((_, check, details)) = update_controls(view.header) {
+                if check.contains(point) {
+                    self.check_update();
+                    return;
+                }
+                if details.contains(point) {
+                    self.modal = Modal::Update;
+                    return;
+                }
+            }
             let (root, work) = buttons(view.footer);
             if root.contains(point) {
                 self.open_folder(false);
@@ -979,6 +1083,19 @@ fn buttons(footer: Rect) -> (Rect, Rect) {
         Rect::new(footer.x + root_width + 1, y, work_width, 1),
     )
 }
+fn update_controls(header: Rect) -> Option<(Rect, Rect, Rect)> {
+    if header.height == 0 {
+        return None;
+    }
+    let row = Rect::new(header.x, header.bottom() - 1, header.width, 1);
+    let controls = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(9),
+        Constraint::Length(13),
+    ])
+    .split(row);
+    Some((controls[0], controls[1], controls[2]))
+}
 fn path_label(path: Option<&std::path::Path>, width: usize) -> String {
     let Some(path) = path else {
         return "—".into();
@@ -1063,6 +1180,44 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             Paragraph::new("OPEN PIXIV DOWNLOADER · Rust + Ratatui")
                 .style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
             view.header,
+        );
+    }
+    if let Some((notice, check, details)) = update_controls(view.header) {
+        let available = matches!(app.update_status, update::Status::Available(_));
+        let text = if notice.width >= 48 {
+            app.update_status.message()
+        } else {
+            match app.update_status {
+                update::Status::Available(_) => "更新あり！".into(),
+                update::Status::Checking => "確認中…".into(),
+                update::Status::Current(_) => "更新なし".into(),
+                update::Status::Failed(_) => "確認不可".into(),
+                update::Status::Unchecked => "未確認".into(),
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(text).style(
+                Style::default()
+                    .fg(if available { Color::Yellow } else { MUTED })
+                    .add_modifier(if available {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            notice,
+        );
+        frame.render_widget(
+            Paragraph::new("[F8 確認]").style(Style::default().fg(MUTED)),
+            check,
+        );
+        frame.render_widget(
+            Paragraph::new("[F9 更新方法]").style(Style::default().fg(if available {
+                CYAN
+            } else {
+                MUTED
+            })),
+            details,
         );
     }
     let fields = Layout::vertical([
@@ -1239,10 +1394,13 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         foot[2],
     );
     if app.modal != Modal::None {
-        let width = body.width.min(72);
+        let width = body
+            .width
+            .min(if app.modal == Modal::Update { 88 } else { 72 });
         let height = body.height.min(match app.modal {
-            Modal::Help => 20,
+            Modal::Help => 22,
             Modal::Result => 24,
+            Modal::Update => 19,
             _ => 12,
         });
         let popup = Rect::new(
@@ -1253,7 +1411,9 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         );
         frame.render_widget(Clear, popup);
         let text = if app.modal == Modal::Help {
-            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜4\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
+            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜4\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
+        } else if app.modal == Modal::Update {
+            app.update_details()
         } else if app.modal == Modal::Result {
             app.summary()
         } else {
@@ -1274,6 +1434,8 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
                 .block(panel(
                     if app.modal == Modal::Help {
                         "HELP"
+                    } else if app.modal == Modal::Update {
+                        "アップデート"
                     } else if app.modal == Modal::Result {
                         "結果 / 欠損 · ↑↓ / PgUp PgDn · Escで閉じる"
                     } else {
@@ -1285,14 +1447,18 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         );
     }
 }
-pub fn run() -> Result<()> {
+pub fn run(automatic_updates: bool) -> Result<()> {
     let no_color = std::env::var_os("NO_COLOR").is_some();
     let mut terminal = ratatui::init();
     // Ratatui's panic hook restores terminal state; the ordinary path also disables paste.
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<bool> {
         let _input_modes = InputModes;
         execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
         let mut app = App::default();
+        app.automatic_updates = automatic_updates;
+        if automatic_updates {
+            app.check_update();
+        }
         loop {
             app.poll();
             terminal.draw(|f| draw(f, &app, no_color))?;
@@ -1322,10 +1488,13 @@ pub fn run() -> Result<()> {
             w.stop.store(true, Ordering::SeqCst);
             let _ = w.handle.join();
         }
-        Ok(())
+        Ok(app.show_update_command)
     })();
     ratatui::restore();
-    result
+    if result? {
+        update::print_instructions();
+    }
+    Ok(())
 }
 struct InputModes;
 impl Drop for InputModes {
@@ -1346,6 +1515,91 @@ impl Drop for App {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn asynchronous_update_notification_is_visible_without_blocking_input() {
+        let mut app = App::default();
+        let (sender, receiver) = mpsc::channel();
+        app.update_receiver = Some(receiver);
+        app.update_status = update::Status::Checking;
+        app.last_update_check = Some(Instant::now());
+        app.poll();
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.urls.value, "x");
+        sender.send(Ok(semver::Version::new(99, 0, 0))).unwrap();
+        app.poll();
+        assert!(matches!(app.update_status, update::Status::Available(_)));
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|f| draw(f, &app, false)).unwrap();
+        // A terminal cell after a wide glyph is padding, not an extra character.
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for row in buffer.content.chunks(120) {
+            let mut x = 0;
+            while x < row.len() {
+                let symbol = row[x].symbol();
+                text.push_str(symbol);
+                x += UnicodeWidthStr::width(symbol).max(1);
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("アップデートが利用できます！"));
+        assert!(text.contains("F9 更新方法"));
+        app.key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
+        assert!(app.update_receiver.is_none());
+        assert!(matches!(app.update_status, update::Status::Available(_)));
+        let (sender, receiver) = mpsc::channel();
+        app.update_receiver = Some(receiver);
+        sender.send(Err("offline".into())).unwrap();
+        app.poll();
+        assert!(matches!(app.update_status, update::Status::Available(_)));
+    }
+    #[test]
+    fn update_dialog_does_not_exit_or_cancel_active_downloads() {
+        let mut app = App::default();
+        let (_sender, receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        app.worker = Some(Worker {
+            receiver,
+            handle: thread::spawn(|| {}),
+            stop: stop.clone(),
+        });
+        app.key(KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE));
+        assert!(app.modal == Modal::Update);
+        assert!(!app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!stop.load(Ordering::SeqCst));
+        assert!(!app.show_update_command);
+        app.worker.take().unwrap().handle.join().unwrap();
+        assert!(app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.show_update_command);
+    }
+    #[test]
+    fn update_failure_and_dialog_render_at_small_widths_and_support_clicks() {
+        for (w, h) in [(40, 18), (80, 24), (120, 36)] {
+            let mut app = App::default();
+            let (sender, receiver) = mpsc::channel();
+            app.update_receiver = Some(receiver);
+            sender.send(Err("接続できません".into())).unwrap();
+            app.poll();
+            assert!(matches!(app.update_status, update::Status::Failed(_)));
+            let area = Rect::new(0, 0, w, h);
+            let view = View::new(area).unwrap();
+            if let Some((_, _, details)) = update_controls(view.header) {
+                app.mouse(
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: details.x,
+                        row: details.y,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    area,
+                );
+                assert!(app.modal == Modal::Update);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| draw(f, &app, true)).unwrap();
+            assert!(app.update_details().contains("接続できません"));
+        }
+    }
     #[test]
     fn logo_has_depth_and_fits_wide_terminal() {
         let rows = logo("OPEN PIXIV");

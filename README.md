@@ -10,19 +10,16 @@
 
 ## 起動
 
-[Rustの現行stable版](https://www.rust-lang.org/tools/install)を用意し、PowerShellでリポジトリのフォルダーを開きます。Windowsでソースからビルドする場合は、Rustの案内に従いVisual Studio Build ToolsのC++ビルド環境も導入してください。
+[Rustの現行stable版](https://www.rust-lang.org/tools/install)を用意し、PowerShellを開きます。Windowsでソースからビルドする場合は、Rustの案内に従いVisual Studio Build ToolsのC++ビルド環境も導入してください。
 
 ```powershell
-cd $HOME
-git clone https://github.com/ELRdn/Open-Pixiv-Downloader.git
-cd Open-Pixiv-Downloader
-cargo install --path . --locked
+cargo install --git https://github.com/ELRdn/Open-Pixiv-Downloader.git --branch main --locked --force
 opixiv
 ```
 
-インストールせず試す場合は `cargo run --release --locked`。以後の更新は、リポジトリのフォルダーへ移動して `git pull` の後に同じインストールコマンドを実行してください。Rust版の実行にPythonは必要ありません。デモ用データも実行ファイルに組み込まれています。
+更新も同じインストールコマンド1行で行えます。作業フォルダーの移動や `git pull` は不要です。リポジトリから開発・試用する場合は、cloneしたフォルダー内で `cargo run --release --locked` を使えます。Rust版の実行にPythonは必要ありません。デモ用データも実行ファイルに組み込まれています。
 
-以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.2` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
+以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.3` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
 
 ## 操作
 
@@ -41,6 +38,7 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 | ← / →、1〜4 | 並行数欄で同時保存数を設定 |
 | ↑ / ↓、PgUp / PgDn | 一覧で作品を選択。Enterでそのフォルダーを開く |
 | F6 / F7 | 保存先／選択した作品のフォルダーを開く。画面下のボタンもクリック可能 |
+| F8 / F9 | 最新版を再確認／更新方法を開く。ロゴ下のボタンもクリック可能 |
 | F1 | ヘルプ |
 | Esc / Ctrl+C | 実行中は停止を要求し、処理終了を待つ。待機中は終了 |
 
@@ -49,6 +47,14 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 16個のURLを貼った場合、既定では2作品を同時に保存し、終わった枠に次の作品を入れます。並行数は1〜4。作者URLは列挙できたイラスト・漫画・うごイラ・小説に展開し、単体URLとの重複を除きます。TUIは作品数の選択上限なしですが、共有の要求予算500件は維持します。
 
 ロゴは `█` の面と `╔═╝` などの影を描き分けます。横幅・高さに応じてロゴと2カラムを縮小し、`NO_COLOR` で色を無効にできます。大きなロゴは、たとえば120桁×36行のWindows Terminalで表示できます。画面が狭い場合は短いロゴ・縦配置になります。
+
+## ツールの更新通知
+
+起動時にGitHubの最新版をバックグラウンドで確認します。その後は保存処理が動いていないときに1時間ごとに確認し、新しいバージョンがあればロゴの下へ **「アップデートが利用できます！」** と表示します。同じバージョンのコミットだけでは通知しません。
+
+**F9 → Enter** でツールを終了し、PowerShellへ貼り付ける更新コマンドを表示します。保存処理の実行中はこの操作で終了せず、完了後に更新へ進めます。F8で手動再確認でき、再確認の間隔は最低1分です。
+
+更新確認は固定のGitHub URLへ接続します。合成デモの保存処理とは別の通信です。完全にオフラインで起動する場合は `opixiv --no-update-check`、または環境変数 `OPIXIV_NO_UPDATE_CHECK=1` を使用してください。引数付きの保存・検査コマンドでは更新確認をしません。通信失敗時は確認できなかった旨を表示し、作品の保存操作は続けられます。[更新確認の仕様](docs/UPDATES_JA.md)も参照してください。
 
 ## 保存コア
 
@@ -97,7 +103,7 @@ python tools/check_rust_compat.py target/debug/opixiv
 
 Windowsの互換性確認では最後のパスを `target/debug/opixiv.exe` にしてください。Pythonは旧版との比較検証にのみ必要で、Rust版の実行時には呼び出しません。
 
-Rustテスト29件、旧Pythonテスト49件、両方向のアーカイブ互換性検査をLinuxで実施しています。実ターミナルでもデモ保存・検査・ZIP出力・終了を確認済みです。GitHub ActionsにWindows／Linuxのビルド・テストと実行ファイルのartifact出力を追加しています。CIの成功とWindows実機での表示確認は区別します。
+Rustテスト34件、旧Pythonテスト49件、両方向のアーカイブ互換性検査をLinuxで実施しています。実ターミナルでもデモ保存・検査・ZIP出力・終了を確認済みです。GitHub ActionsにWindows／Linuxのビルド・テストと実行ファイルのartifact出力を追加しています。CIの成功とWindows実機での表示確認は区別します。
 
 | 場所 | 内容 |
 |---|---|
