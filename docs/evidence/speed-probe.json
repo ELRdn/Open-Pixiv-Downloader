@@ -1,0 +1,232 @@
+{
+  "archive_runs": [
+    {
+      "collection_copied": 4000,
+      "collection_existing": 0,
+      "elapsed_seconds": 7.16712329,
+      "pass": "fresh",
+      "requests": 4001,
+      "workers": 1,
+      "works": 4000
+    },
+    {
+      "collection_copied": 0,
+      "collection_existing": 4000,
+      "elapsed_seconds": 1.023847258,
+      "pass": "resume",
+      "requests": 1,
+      "workers": 1,
+      "works": 4000
+    },
+    {
+      "collection_copied": 4000,
+      "collection_existing": 0,
+      "elapsed_seconds": 3.724984298,
+      "pass": "fresh",
+      "requests": 4001,
+      "workers": 4,
+      "works": 4000
+    },
+    {
+      "collection_copied": 0,
+      "collection_existing": 4000,
+      "elapsed_seconds": 0.866507927,
+      "pass": "resume",
+      "requests": 1,
+      "workers": 4,
+      "works": 4000
+    }
+  ],
+  "scope": "Linux loopback HTTP (not TLS), 40 ms scaled limiter; production offline archive/collection code; synthetic novels without covers, 6400 UTF-8 bytes of body each; warm caches/order uncontrolled; no Windows or live Pixiv measurement",
+  "transport_runs": [
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.609108134,
+      "explicit_rate_wait_seconds": 0.563001333,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.606649463,
+      "explicit_rate_wait_seconds": 0.565199225,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.606198145,
+      "explicit_rate_wait_seconds": 0.563352533,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.604894058,
+      "explicit_rate_wait_seconds": 0.566098014,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.604305237,
+      "explicit_rate_wait_seconds": 0.564595896,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.634453172,
+      "explicit_rate_wait_seconds": 0.566894092,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 1.332096218,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 1.320427188,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 1.6775336570000001,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 1.310284908,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 1.312088493,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 1.314386944,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 1.32931567,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 1.325642418,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 1.319709488,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 0.684095489,
+      "explicit_rate_wait_seconds": 0.570308493,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 0.684672856,
+      "explicit_rate_wait_seconds": 0.567873383,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 0.686390134,
+      "explicit_rate_wait_seconds": 0.569958688,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    }
+  ],
+  "version": "0.2.0-alpha.4",
+  "environment": {
+    "os": "Linux cloud container",
+    "rust": "1.99.1",
+    "source_revision": "d903c3791479652f948756415c65263e2e577ff4",
+    "build": "release",
+    "synthetic_body_bytes": 6400,
+    "external_pixiv_requests": 0
+  }
+}

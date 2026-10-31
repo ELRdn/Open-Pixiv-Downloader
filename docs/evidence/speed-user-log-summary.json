@@ -1,0 +1,38 @@
+{
+  "analysis_date_jst": "2026-11-01",
+  "source_revision": "d903c3791479652f948756415c65263e2e577ff4",
+  "user_log": {
+    "provenance": "User-provided excerpt; not independently read from the Windows PC; per-work IDs and URLs omitted",
+    "tool_version": "0.2.0-alpha.1",
+    "started_at": "2026-10-31T13:23:40.340061+00:00",
+    "finished_at": "2026-10-31T13:39:52.959828700+00:00",
+    "jobs": 4,
+    "requests": 487,
+    "discovered": 4332,
+    "selected": 4331,
+    "already_complete": 1,
+    "counts": {
+      "complete": 231,
+      "partial": 11,
+      "paused": 4
+    },
+    "unattempted_selected": 4085,
+    "reason": "Job stopped; completed works remain saved",
+    "observed_omission": "11 cover.jpg HTTPS request failures in supplied excerpt"
+  },
+  "derived": {
+    "elapsed_seconds_from_timestamps": 972.6197677,
+    "request_start_spacing_lower_bound_seconds": 972,
+    "lower_bound_divided_by_elapsed": 0.9993627852110536,
+    "requests_per_complete_or_partial": 2.012396694214876,
+    "complete_or_partial_works_per_second": 0.2488125452891718
+  },
+  "caveats": [
+    "Missing explicit elapsed/rate_wait/bytes/header/transfer timings in alpha.1",
+    "Lower bound fraction is NOT the fraction of thread sleep or idle time",
+    "Requests counts starts including failed attempts; cancelled works may have issued requests",
+    "No evidence that the 500 request budget caused this pause at request 487",
+    "Aggregate copies were introduced after the observed version",
+    "No exact cause for HTTPS failures can be recovered from this redacted error string"
+  ]
+}

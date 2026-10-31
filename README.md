@@ -121,6 +121,8 @@ opixiv fetch --input urls.txt --online --all --jobs 2 --out archive
 
 さらに転送・原子的な書き込み・ハッシュ照合・うごイラのCRC検査がかかります。利用者の回線・ストレージ別の内訳は未測定です。新しい実行結果には所要時間、送信間隔の待機時間、リクエスト数を表示し、F3と `last-run.json` でも確認できます。送信間隔の待機は他作品の転送と重なるため、所要時間から差し引いた値を転送時間とは扱いません。詳細は[速度の仕組み](docs/SPEED_JA.md)を参照してください。
 
+4,332作品の実行ログについて、要求数と経過時間から原因を絞った[性能分析と改善提案](docs/PERFORMANCE_REVIEW_JA.md)も参照できます。通信間隔・保存品質は、この調査では変更していません。
+
 ## 開発と検証
 
 ```sh
@@ -139,7 +141,7 @@ Rustテスト39件、旧Pythonテスト49件、両方向のアーカイブ互換
 |---|---|
 | `rust/`、`Cargo.toml`、`Cargo.lock` | 現行のRust製CLI・Ratatui・保存コア |
 | `src/pixiv_archive/`、`run.py`、`tests/` | 比較検証用の旧Python版。`python run.py` で従来画面を起動 |
-| `examples/` | 自作の合成fixture。実作品・認証情報なし |
+| `examples/` | 自作の合成fixture・ネットワーク不要の性能再現コード。実作品・認証情報なし |
 | [Windows診断拡張](tools/windows-probe/README_JA.md) | 通常閲覧セッションでメタデータを確認する補助ツール |
 | [移行記録](docs/RUST_MIGRATION_JA.md)・[検証状況](docs/STATUS_JA.md) | 移行の範囲と既知の不足 |
 | [計画](docs/PLAN_JA.md)・[OSS比較](docs/COMPARISON_JA.md) | 目標と採用判断 |
