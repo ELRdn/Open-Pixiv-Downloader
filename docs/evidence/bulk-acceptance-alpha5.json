@@ -1,0 +1,179 @@
+{
+  "scope": "Synthetic offline fixture only; no Pixiv HTTP/TLS or network rate-limit benchmark",
+  "platform": "Linux",
+  "novels_per_large_case": 4000,
+  "body_utf8_bytes": 5820,
+  "checks": [
+    {
+      "case": "shared_covers_fresh",
+      "exit_code": 0,
+      "wall_seconds": 4.547379057999933,
+      "tool_version": "0.2.0-alpha.5",
+      "status": "complete",
+      "requests": 4002,
+      "counts": {
+        "complete": 4000
+      },
+      "already_complete": 0,
+      "stop_reason": null,
+      "elapsed_seconds": 4.474354425,
+      "body_ready_count": 4000,
+      "full_complete_count": 4000
+    },
+    {
+      "case": "shared_covers_resume_complete",
+      "exit_code": 0,
+      "wall_seconds": 1.7269814200008113,
+      "tool_version": "0.2.0-alpha.5",
+      "status": "complete",
+      "requests": 0,
+      "counts": {},
+      "already_complete": 4000,
+      "stop_reason": null,
+      "elapsed_seconds": 1.676041616,
+      "body_ready_count": 4000,
+      "full_complete_count": 4000
+    },
+    {
+      "case": "corrupt_original_detected",
+      "exit_code": 1,
+      "wall_seconds": 0.4343084460015234
+    },
+    {
+      "case": "corrupt_cover_missing_only_repair",
+      "exit_code": 0,
+      "wall_seconds": 1.1782533510013309,
+      "tool_version": "0.2.0-alpha.5",
+      "status": "complete",
+      "requests": 1,
+      "counts": {
+        "complete": 1
+      },
+      "already_complete": 3999,
+      "stop_reason": null,
+      "elapsed_seconds": 1.140004235,
+      "body_ready_count": 4000,
+      "full_complete_count": 4000
+    },
+    {
+      "case": "edited_flat_copy_preserved",
+      "exit_code": 1,
+      "wall_seconds": 0.19434001599802286,
+      "status": "partial"
+    },
+    {
+      "case": "originals_remain_valid_after_flat_edit",
+      "exit_code": 0,
+      "wall_seconds": 0.483515351999813
+    },
+    {
+      "case": "deleted_flat_copy_restored_offline",
+      "exit_code": 0,
+      "wall_seconds": 0.2269447550024779,
+      "status": "complete"
+    },
+    {
+      "case": "unique_covers_fresh",
+      "exit_code": 0,
+      "wall_seconds": 4.345353623997653,
+      "tool_version": "0.2.0-alpha.5",
+      "status": "complete",
+      "requests": 8001,
+      "counts": {
+        "complete": 4000
+      },
+      "already_complete": 0,
+      "stop_reason": null,
+      "elapsed_seconds": 4.243233519,
+      "body_ready_count": 4000,
+      "full_complete_count": 4000
+    },
+    {
+      "case": "missing_shared_cover_body_preserved",
+      "exit_code": 1,
+      "wall_seconds": 0.027055766997364117,
+      "tool_version": "0.2.0-alpha.5",
+      "status": "partial",
+      "requests": 18,
+      "counts": {
+        "partial": 16
+      },
+      "already_complete": 0,
+      "stop_reason": null,
+      "elapsed_seconds": 0.021891904,
+      "body_ready_count": 16,
+      "full_complete_count": 0
+    },
+    {
+      "case": "missing_shared_cover_repair_without_body_requests",
+      "exit_code": 0,
+      "wall_seconds": 0.025146642998151947,
+      "tool_version": "0.2.0-alpha.5",
+      "status": "complete",
+      "requests": 1,
+      "counts": {
+        "complete": 16
+      },
+      "already_complete": 0,
+      "stop_reason": null,
+      "elapsed_seconds": 0.020989051,
+      "body_ready_count": 16,
+      "full_complete_count": 16
+    },
+    {
+      "case": "exact_fit_budget_finishes_local_stages",
+      "exit_code": 0,
+      "wall_seconds": 0.019086492000496946,
+      "tool_version": "0.2.0-alpha.5",
+      "status": "complete",
+      "requests": 10,
+      "counts": {
+        "complete": 8
+      },
+      "already_complete": 0,
+      "stop_reason": null,
+      "elapsed_seconds": 0.015887219,
+      "body_ready_count": 8,
+      "full_complete_count": 8
+    },
+    {
+      "case": "budget_exhaustion_graceful_pause",
+      "exit_code": 1,
+      "wall_seconds": 0.01718257100219489,
+      "tool_version": "0.2.0-alpha.5",
+      "status": "paused",
+      "requests": 4,
+      "counts": {
+        "paused": 4
+      },
+      "already_complete": 0,
+      "stop_reason": {
+        "kind": "request_budget"
+      },
+      "elapsed_seconds": 0.009823742,
+      "body_ready_count": 3,
+      "full_complete_count": 0
+    },
+    {
+      "case": "budget_resume_saved_selection",
+      "exit_code": 0,
+      "wall_seconds": 0.02637912800128106,
+      "tool_version": "0.2.0-alpha.5",
+      "status": "complete",
+      "requests": 14,
+      "counts": {
+        "complete": 16
+      },
+      "already_complete": 0,
+      "stop_reason": null,
+      "elapsed_seconds": 0.021811308,
+      "body_ready_count": 16,
+      "full_complete_count": 16
+    }
+  ],
+  "status": "passed",
+  "wall_seconds": 16.141924763000134,
+  "build": "release",
+  "source_revision": "8e5f8c0cf91d4dbf125969b202ddbfc13291c1ea",
+  "recorded_date_jst": "2026-11-01"
+}

@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0-alpha.5",
+  "source_revision": "8e5f8c0cf91d4dbf125969b202ddbfc13291c1ea",
+  "date_jst": "2026-11-01",
+  "host": "Linux cloud container",
+  "rust_tests": 90,
+  "python_legacy_tests": 49,
+  "rustfmt": "passed",
+  "clippy_all_targets": "passed",
+  "compatibility": {
+    "rust_to_python": "passed",
+    "python_to_rust": "passed",
+    "original_bytes_and_file_sets": "matched",
+    "corruption_repair": "passed"
+  },
+  "bulk_integration_cases": 13,
+  "bulk_works_each_shared_unique_case": 4000,
+  "real_process_hard_kill_resume": "passed",
+  "actual_linux_pty": "passed",
+  "pixiv_network_requests_in_this_change": 0,
+  "windows_native_validation": "not run here; CI configured; Actions API Forbidden prevents verification",
+  "rust_minimum": "1.89 declared; tests run with1.99.1",
+  "limitations": [
+    "blocking reads may wait until30s request timeout after cancellation",
+    "Windows native UX/live Pixiv throughput not independently measured",
+    "legacy PID-only locks require manual confirmation",
+    "legacy damaged raw without snapshot identity cannot safely reconstruct original version",
+    "general remote version tracking/retention not implemented",
+    "cache reservations exclude original/aggregate copy temps; hard kill may leave temporary files"
+  ]
+}

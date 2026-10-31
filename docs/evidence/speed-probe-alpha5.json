@@ -1,0 +1,228 @@
+{
+  "archive_runs": [
+    {
+      "collection_copied": 40,
+      "collection_existing": 0,
+      "elapsed_seconds": 0.100224854,
+      "pass": "fresh",
+      "requests": 41,
+      "workers": 1,
+      "works": 40
+    },
+    {
+      "collection_copied": 0,
+      "collection_existing": 40,
+      "elapsed_seconds": 0.008476194,
+      "pass": "resume",
+      "requests": 1,
+      "workers": 1,
+      "works": 40
+    },
+    {
+      "collection_copied": 40,
+      "collection_existing": 0,
+      "elapsed_seconds": 0.034017673,
+      "pass": "fresh",
+      "requests": 41,
+      "workers": 4,
+      "works": 40
+    },
+    {
+      "collection_copied": 0,
+      "collection_existing": 40,
+      "elapsed_seconds": 0.009094982,
+      "pass": "resume",
+      "requests": 1,
+      "workers": 4,
+      "works": 40
+    }
+  ],
+  "scope": "Linux loopback HTTP (not TLS), 40 ms scaled limiter; production offline archive/collection code; synthetic novels without covers, 6400 UTF-8 bytes of body each; warm caches/order uncontrolled; no Windows or live Pixiv measurement",
+  "transport_runs": [
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.603582578,
+      "explicit_rate_wait_seconds": 0.569253977,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.615898473,
+      "explicit_rate_wait_seconds": 0.545702823,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.603603205,
+      "explicit_rate_wait_seconds": 0.573414975,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.603658519,
+      "explicit_rate_wait_seconds": 0.601538936,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.6037757,
+      "explicit_rate_wait_seconds": 0.599971324,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.603504155,
+      "explicit_rate_wait_seconds": 0.601354274,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 1.315433329,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 1.300217068,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 1.30175073,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.695172356,
+      "explicit_rate_wait_seconds": 0.603389022,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.692914549,
+      "explicit_rate_wait_seconds": 0.602596304,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 0,
+      "elapsed_seconds": 0.693051626,
+      "explicit_rate_wait_seconds": 0.603013509,
+      "header_delay_ms": 80,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 1.322742926,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 1.317133653,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 1.315583178,
+      "explicit_rate_wait_seconds": 0.0,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 1
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 0.703855538,
+      "explicit_rate_wait_seconds": 0.606468138,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 0.700832297,
+      "explicit_rate_wait_seconds": 0.602304619,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    },
+    {
+      "body_delay_ms": 80,
+      "elapsed_seconds": 0.707111535,
+      "explicit_rate_wait_seconds": 0.603576143,
+      "header_delay_ms": 1,
+      "interval_ms": 40,
+      "requests": 16,
+      "start_spacing_floor_seconds": 0.6,
+      "workers": 4
+    }
+  ],
+  "version": "0.2.0-alpha.5",
+  "build": "release",
+  "note": "Loopback HTTP is 16 requests at scaled40ms; archive runs use40syntheticworks; not a Pixiv or Windows benchmark; transport source unchanged through final integrity fixes",
+  "source_revision_base": "056785f77f126c418f0f2164e3cce72f39fd7ab5",
+  "transport_sha256": "e3f7d8f0cf75777d384a9b7aee5550235835f249ad4b91ef8432541121f45a14"
+}

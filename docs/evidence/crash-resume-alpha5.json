@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0-alpha.5",
+  "platform": "Linux",
+  "scope": "Real process kill after a saved body; generated 4000-work fixture; no network",
+  "hard_kill_exit_code": -9,
+  "resume_status": "complete",
+  "full_complete_count": 4000,
+  "requests_on_resume": 3995,
+  "stale_versioned_sentinel_recovered": true,
+  "manual_lock_removal": false,
+  "compatibility_sentinel_removed_on_exit": true,
+  "persistent_os_guard_file_remains": true,
+  "build": "release",
+  "source_revision": "8e5f8c0cf91d4dbf125969b202ddbfc13291c1ea",
+  "recorded_date_jst": "2026-11-01"
+}

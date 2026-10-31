@@ -1,0 +1,25 @@
+{
+  "terminal": "Actual Linux PTY 120x36; pyte decodes captured terminal cells",
+  "binary": "target/release/opixiv",
+  "fixture": "Embedded synthetic 4 formats; no Pixiv/media network; updates disabled",
+  "settings_custom_budget": 12345,
+  "settings_preset_budget": 20000,
+  "balanced_opt_in": true,
+  "body_ready": 1,
+  "full_complete": 4,
+  "resume_without_urls_requests": 0,
+  "F11_and_CtrlR": "passed",
+  "F6_F7_row_enter_mouse": "passed",
+  "AltI_AltN_mouse": "passed",
+  "japanese_space_paths_single_argument": "passed",
+  "verify_keeps_rows": "passed",
+  "clean_exit": "passed",
+  "limitations": [
+    "Linux PTY only; no Windows host/function-key interception measurement",
+    "Desktop opener is a child-PATH mock; actual Explorer is not invoked",
+    "4000-row rendering separately covered by TestBackend regression; PTY fixture has4works"
+  ],
+  "tool_version": "0.2.0-alpha.5",
+  "build": "release",
+  "source_revision": "8e5f8c0cf91d4dbf125969b202ddbfc13291c1ea"
+}

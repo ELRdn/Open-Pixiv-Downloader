@@ -10,7 +10,7 @@
 
 ## 起動
 
-[Rustの現行stable版](https://www.rust-lang.org/tools/install)を用意し、PowerShellを開きます。Windowsでソースからビルドする場合は、Rustの案内に従いVisual Studio Build ToolsのC++ビルド環境も導入してください。
+[Rust 1.89以降の現行stable版](https://www.rust-lang.org/tools/install)を用意し、PowerShellを開きます。Windowsでソースからビルドする場合は、Rustの案内に従いVisual Studio Build ToolsのC++ビルド環境も導入してください。
 
 ```powershell
 cargo install --git https://github.com/ELRdn/Open-Pixiv-Downloader.git --branch main --locked --force
@@ -19,7 +19,7 @@ opixiv
 
 更新も同じインストールコマンド1行で行えます。作業フォルダーの移動や `git pull` は不要です。リポジトリから開発・試用する場合は、cloneしたフォルダー内で `cargo run --release --locked` を使えます。Rust版の実行にPythonは必要ありません。デモ用データも実行ファイルに組み込まれています。
 
-以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.4` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
+以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.5` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
 
 ## 操作
 
@@ -41,12 +41,14 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 | ↑ / ↓、PgUp / PgDn | 一覧で作品を選択。Enterでそのフォルダーを開く |
 | F6 / F7 | 保存先／選択した作品のフォルダーを開く。画面下のボタンもクリック可能 |
 | F8 / F9 | 最新版を再確認／更新方法を開く。ロゴ下のボタンもクリック可能 |
+| F10 | 通信方式と要求予算。通信分離を選択すると全体1秒・API2秒・媒体1秒 |
+| F11 / Ctrl+R | 保存先にある最新の対象一覧から再開。URLの再入力や作者一覧の再取得は不要 |
 | F1 | ヘルプ |
 | Esc / Ctrl+C | 実行中は停止を要求し、処理終了を待つ。待機中は終了 |
 
 一覧は `WORK`・`STATUS`・`OUTPUT / PATH` の3列です。実際に作成された作品フォルダーを表示し、長いパスは末尾を残して省略します。F3ではフルパスを確認できます。検査後も行を保持し、再開でスキップした保存済み作品も表示します。Windowsはエクスプローラー、macOSはFinder、Linuxは既定のファイルマネージャーを呼び出します。
 
-16個のURLを貼った場合、既定では2作品を同時に保存し、終わった枠に次の作品を入れます。並行数は1〜4。作者URLは列挙できたイラスト・漫画・うごイラ・小説に展開し、単体URLとの重複を除きます。TUIは作品数の選択上限なしですが、共有の要求予算500件は維持します。
+16個のURLを貼った場合、既定では2ワーカーで本文・素材の各段階を進めます。並行数は1〜4。作者URLは列挙できたイラスト・漫画・うごイラ・小説に展開し、単体URLとの重複を除きます。TUIは作品数の選択上限なし、要求予算は既定20,000回でF10から変更できます。本文利用可能数と全素材完了数は別に表示します。**F5で一覧確認 → F11で同じ一覧を保存**することもできます。[大量保存と再開の使い方](docs/BULK_DOWNLOAD_JA.md)を参照してください。
 
 ロゴは `█` の面と `╔═╝` などの影を描き分けます。横幅・高さに応じてロゴと2カラムを縮小し、`NO_COLOR` で色を無効にできます。大きなロゴは、たとえば120桁×36行のWindows Terminalで表示できます。画面が狭い場合は短いロゴ・縦配置になります。
 
@@ -60,7 +62,7 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 
 ## 必要なファイルだけを集める
 
-作品別の保存に加えて、保存後に `archive/works/image` と `archive/works/novel` へコピーを自動で作ります。
+作品別の保存に加えて、`archive/works/image` と `archive/works/novel` へコピーを自動で作ります。小説本文は、表紙・挿絵の取得完了を待たず先に集約します。
 
 ```text
 archive/works/
@@ -111,9 +113,9 @@ opixiv plan --input urls.txt --online --all --out archive
 opixiv fetch --input urls.txt --online --all --jobs 2 --out archive
 ```
 
-`--demo`、`--fixture examples/synthetic-fixture.json`、`--online` のいずれかを指定します。`--types art|novel|all`、`--limit`、`--retry-unavailable`、`--request-budget`、`--max-file-mib` も利用できます。
+`--demo`、`--fixture examples/synthetic-fixture.json`、`--online` のいずれかを指定します。`--types art|novel|all`、`--limit`、`--retry-unavailable`、`--request-budget`、`--balanced`、`--resume`、`--max-file-mib` も利用できます。
 
-オンラインのリクエスト開始間隔は全ワーカーで共有し、既定2秒。401・403・429、リダイレクト、HTML応答では全体を停止します。自動リトライはせず、再実行で再開します。`--all` は作品数の選択上限を外す指定で、要求予算や閲覧条件を変更しません。現状は匿名取得のみ、公開・全年齢と確認できる作品だけを対象とします。
+オンラインのリクエスト開始間隔は全ワーカーで共有し、既定2秒。401・403・429、リダイレクト、HTML応答では全体を停止します。媒体の一時的な通信失敗・5xxは追加最大2回の有限再試行を行い、予算を消費します。401・403・429や404・410では自動再試行しません。保存済みの対象からは `--resume` またはF11で再開できます。`--all` は作品数の選択上限を外す指定で、要求予算や閲覧条件を変更しません。現状は匿名取得のみ、公開・全年齢と確認できる作品だけを対象とします。
 
 ## 速度について
 
@@ -121,7 +123,7 @@ opixiv fetch --input urls.txt --online --all --jobs 2 --out archive
 
 さらに転送・原子的な書き込み・ハッシュ照合・うごイラのCRC検査がかかります。利用者の回線・ストレージ別の内訳は未測定です。新しい実行結果には所要時間、送信間隔の待機時間、リクエスト数を表示し、F3と `last-run.json` でも確認できます。送信間隔の待機は他作品の転送と重なるため、所要時間から差し引いた値を転送時間とは扱いません。詳細は[速度の仕組み](docs/SPEED_JA.md)を参照してください。
 
-4,332作品の実行ログについて、要求数と経過時間から原因を絞った[性能分析と改善提案](docs/PERFORMANCE_REVIEW_JA.md)も参照できます。通信間隔・保存品質は、この調査では変更していません。
+alpha.5では同じ表紙の取得共有、本文の先行確定、欠損だけの修復、通信制御の分離、予算到達時の保存継続を追加しました。**速度を変更する場合はF10で「API・媒体を分離」を選択してください。** 起動時は互換設定を使います。[使い方と制約](docs/BULK_DOWNLOAD_JA.md)、[元の性能分析](docs/PERFORMANCE_REVIEW_JA.md)も参照できます。
 
 ## 開発と検証
 
@@ -131,11 +133,12 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --locked
 python tools/check_rust_compat.py target/debug/opixiv
+python tools/check_bulk.py target/debug/opixiv --count 4000
 ```
 
 Windowsの互換性確認では最後のパスを `target/debug/opixiv.exe` にしてください。Pythonは旧版との比較検証にのみ必要で、Rust版の実行時には呼び出しません。
 
-Rustテスト39件、旧Pythonテスト49件、両方向のアーカイブ互換性検査をLinuxで実施しています。実ターミナルでもデモ保存・検査・ZIP出力・終了を確認済みです。GitHub ActionsにWindows／Linuxのビルド・テストと実行ファイルのartifact出力を追加しています。CIの成功とWindows実機での表示確認は区別します。
+Rustテスト90件、旧Pythonテスト49件、両方向のアーカイブ互換性検査をLinuxで実施しています。実ターミナルでもデモ保存・検査・ZIP出力・終了を確認済みです。GitHub ActionsにWindows／Linuxのビルド・テストと実行ファイルのartifact出力を追加しています。CIの成功とWindows実機での表示確認は区別します。
 
 | 場所 | 内容 |
 |---|---|
@@ -150,7 +153,7 @@ Rustテスト39件、旧Pythonテスト49件、両方向のアーカイブ互換
 
 ## 既知の不足と利用条件
 
-本人セッションとの連携、4形式の実サイト互換性、Windows実機、全小説記法・媒体デコーダーによる照合は未検証です。クラウドからの作品APIはHTTP 403で、取得可能と判定していません。更新検出・旧版保持・GUIは未実装です。従来Python版にはうごイラZIPのCRC不一致を見逃すケースが残っています。
+開発環境での本人セッションとの連携、4形式の実サイト互換性、Windows実機、全小説記法・媒体デコーダーによる照合は未検証です。クラウドからの作品APIはHTTP 403で、取得可能と判定していません。更新検出・旧版保持・GUIは未実装です。従来Python版にはうごイラZIPのCRC不一致を見逃すケースが残っています。
 
 [公式ガイドライン](https://policies.pixiv.net/)の「アプリケーション、各種サービス等への使用について」には、クローラー等を用いた作品収集の禁止が明記されています。作者の許諾とサービス側の利用条件は別に確認し、自動取得方式の適合を確認済みとは扱っていません。
 
