@@ -1,7 +1,22 @@
 use thiserror::Error;
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StopReason {
+    UserCancel,
+    RequestBudget,
+    HttpStatus { status: u16 },
+    UnexpectedContent,
+    WorkerError,
+    DiskError,
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Request budget reached; active transfers remain saved")]
+    Budget,
+    #[error("{0}")]
+    Retryable(String),
     #[error("{0}")]
     Invalid(String),
     #[error("{0}")]

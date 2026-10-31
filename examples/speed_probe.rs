@@ -8,6 +8,8 @@ mod collection;
 mod error;
 #[path = "../rust/jobs.rs"]
 mod jobs;
+#[path = "../rust/media.rs"]
+mod media;
 #[path = "../rust/novel.rs"]
 mod novel;
 #[path = "../rust/target.rs"]
@@ -56,13 +58,13 @@ mod transport {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap(),
-            gate: Mutex::new(Admission {
-                last: None,
-                count: 0,
-                waiting: Duration::ZERO,
-            }),
+            gate: Mutex::new(Admission::default()),
+            wake: Condvar::new(),
             stop: Arc::default(),
             interval: Duration::from_millis(40),
+            class_intervals: [Duration::from_millis(40); 2],
+            retry_delay: Duration::from_millis(1),
+            started: Instant::now(),
             budget: count,
             max_bytes: 1024,
         });
@@ -123,6 +125,7 @@ fn main() {
             targets: vec!["user:9001".into()],
             all: true,
             jobs: workers,
+            request_budget: 100000,
             fixture: Some(fixture.clone()),
             out: temp.path().join(format!("archive-{workers}")),
             ..Default::default()
