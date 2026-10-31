@@ -7,11 +7,40 @@
 ## このリポジトリの内容
 
 - `src/pixiv_archive/`：**Pixiv Archive Lab 0.1.0a1** を基盤に、一括入力と並列保存を追加したPython製CLI。パッケージ名とCLI名は元のものです。
-- `examples/`、`tests/`：実作品を含まない合成データ、既存33件と追加7件のテスト。
+- `examples/`、`tests/`：実作品を含まない合成データと49件のPythonテスト。
 - [Windows診断拡張](tools/windows-probe/README_JA.md)：指定4作品のメタデータを通常の閲覧セッションで確認するEdge／Chrome用補助ツール。
 - [計画](docs/PLAN_JA.md)、[OSS比較](docs/COMPARISON_JA.md)、[α版の採用判断](docs/ALPHA_REVIEW_JA.md)、[現在の検証状況](docs/STATUS_JA.md)。
 
-## オフラインで試す
+## 起動する
+
+PowerShellでリポジトリのフォルダーを開き、次だけ実行します。
+
+```powershell
+python run.py
+```
+
+ロゴと `Welcome to Open Pixiv Downloader` が表示されます。URLをそのまま貼り付けるか、`/help` で操作を選びます。URLの入力は空行で確定し、保存先と並行数を選択してEnterで開始します。
+
+```text
+opixiv > /demo
+保存先 [demo-archive] >
+同時に保存する作品数（1〜4） [2] >
+Enterで開始 / bでメニューへ / qで終了 >
+```
+
+| 操作 | 内容 |
+|---|---|
+| URLを直接貼る・`/download` | 作品・作者・シリーズURLをまとめて保存 |
+| `/demo` | 同梱の4作品で通信なしの体験 |
+| `/verify` | 保存済み作品の整合性を検査 |
+| `/pack` | 完成済み作品をZIPに出力 |
+| `/help`・`/quit` | ヘルプ・終了 |
+
+保存・検査中は進捗と日本語の結果を表示します。同じセッションでは設定した保存先・並行数を再利用できます。デモの保存先は実作品用の既定値と分離しています。狭い端末・色を表示できない端末にも対応し、`NO_COLOR` 設定時は色を使いません。
+
+インストールする場合は `python -m pip install -e .` の後、`opixiv` だけでも同じ画面を起動できます。引数なしで標準入力がパイプの場合は対話待ちせず終了します。自動処理には以下のコマンド形式を使ってください。
+
+## コマンドでオフライン実行する
 
 Python 3.11以上で、リポジトリのルートから実行します。実行時の追加パッケージは不要です。Windowsでは環境に応じて `python` を `py -3` に置き換えてください。
 
@@ -29,7 +58,7 @@ python run_tests.py
 node --test tools/windows-probe/collector.test.mjs
 ```
 
-Node.jsは診断拡張の開発用テストにだけ必要です。Pythonコアのテストは40件、診断処理のテストは8件です。Linuxでの実行結果であり、Windows対応の証明ではありません。
+Node.jsは診断拡張の開発用テストにだけ必要です。Pythonコア・対話モードのテストは49件、診断処理のテストは8件です。Linuxでの実行結果であり、Windows対応の証明ではありません。
 
 ## URLをまとめて指定する
 

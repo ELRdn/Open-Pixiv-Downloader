@@ -2,8 +2,9 @@
 
 The Python core, its tests, and the synthetic fixtures are imported from the
 user-supplied **Pixiv Archive Lab 0.1.0a1** archive. Subsequent changes add batch
-input, bounded concurrent work scheduling, and coordinated database/network
-access. Its MIT copyright notice is preserved in [LICENSE](LICENSE).
+input, bounded concurrent work scheduling, coordinated database/network
+access, and a guided terminal interface. Its MIT copyright notice is preserved
+in [LICENSE](LICENSE).
 
 Original archive SHA-256:
 `7b9ee8afd0557f904b4e1791ae5a0ad002728f7d701a94a50332e0e72bea6777`.

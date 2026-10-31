@@ -35,6 +35,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--request-budget", type=int, default=500)
         command.add_argument("--max-file-mib", type=int, default=256)
         command.add_argument("--retry-unavailable", action="store_true", help="Recheck previously skipped or unavailable IDs")
+    commands.add_parser("interactive", help="Open the guided terminal interface")
     verify = commands.add_parser("verify", help="Verify saved file checksums without network access")
     verify.add_argument("out", type=Path)
     pack = commands.add_parser("pack", help="Export complete works only to a ZIP64-compatible archive")
@@ -47,15 +48,29 @@ def output(value):
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, reporter=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv or argv == ["interactive"]:
+        if not argv and not sys.stdin.isatty():
+            print("対話モードはターミナルで python run.py を実行してください。コマンド一覧: --help", file=sys.stderr)
+            return 2
+        from .interactive import run
+        return run(main)
     args = parser().parse_args(argv)
+
+    def show(value):
+        if reporter:
+            reporter("result", value)
+        else:
+            output(value)
+
     try:
         if args.command in ("verify", "pack"):
             if not (args.out / "state.sqlite3").is_file():
                 raise ArchiveError("Archive database does not exist")
             with Archive(args.out) as archive:
                 result = archive.verify_all() if args.command == "verify" else archive.pack(args.zip)
-            output(result)
+            show(result)
             return 1 if result.get("problems") else 0
         if not 1 <= args.limit <= 1000:
             raise ArchiveError("--limit must be between 1 and 1000")
@@ -82,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
         interrupted = False
         with Archive(args.out, client) as archive:
             try:
+                if reporter:
+                    reporter("discovering", {"targets": len(targets)})
                 # Complete discovery before downloads, and deduplicate overlapping author/work URLs.
                 refs = list(dict.fromkeys(ref for target_kind, target_id in targets
                     for ref in discover(client, target_kind, target_id, types)))
@@ -98,12 +115,17 @@ def main(argv: list[str] | None = None) -> int:
                                "selected": len(selected), "deferred_by_limit": max(0, len(remaining) - len(selected)),
                                "previous_exclusions": len(exclusions),
                                "order": "unattempted first, then API series order or kind/ID descending"})
+                if reporter:
+                    reporter("selected", report)
                 if args.command == "plan":
                     report["selected_targets"] = [f"{ref.kind}:{ref.id}" for ref in selected]
                     report["status"] = "planned"
                 else:
                     for ref, status in download_many(archive, selected, args.jobs):
                         report["results"].append({"key": ref.key, "status": status})
+                        if reporter:
+                            reporter("progress", {"done": len(report["results"]), "total": len(selected),
+                                                  "key": ref.key, "status": status})
                     counts = Counter(item["status"] for item in report["results"])
                     report["counts"] = dict(counts)
                     report["status"] = ("complete" if all(item["status"] in ("complete", "already_complete")
@@ -127,12 +149,15 @@ def main(argv: list[str] | None = None) -> int:
                 # Retain each run for audit, instead of overwriting the only record.
                 name = report["started_at"].replace(":", "-")
                 atomic_bytes(safe_path(archive.root, f"runs/{name}.json"), json_bytes(report))
-        output(report)
+        show(report)
         if interrupted:
             return 130
         return 0 if report["status"] in ("planned", "complete") else 1
     except (ArchiveError, ValueError, OSError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        if reporter:
+            reporter("error", str(exc))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
         return 2
 
 
