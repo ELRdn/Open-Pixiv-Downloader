@@ -1,0 +1,9 @@
+{
+  "url": "https://policies.pixiv.net/",
+  "http_status_observed": 200,
+  "recorded_at_utc": "2026-10-30T15:04:57.328854+00:00",
+  "bytes": 585107,
+  "sha256": "7a86bef821867a0d645863a4366042df417e63a8eb2d417922846bed445e4ddd",
+  "section": "アプリケーション、各種サービス等への使用について",
+  "finding": "Guideline explicitly prohibits collecting works with crawlers or similar programs; applicability to the planned acquisition method remains a project decision."
+}

@@ -1,0 +1,16 @@
+:root { color-scheme: light dark; font-family: "Yu Gothic UI", system-ui, sans-serif; }
+body { margin: 0; background: light-dark(#f3f5f8, #121821); color: light-dark(#172233, #e5edf8); }
+main { max-width: 780px; margin: 56px auto; padding: 36px; background: light-dark(#fff, #1d2735); border-radius: 16px; }
+.eyebrow { color: light-dark(#46617e, #a3bfdf); font-size: .8rem; letter-spacing: .12em; }
+h1 { margin: 12px 0 24px; font-size: 2rem; }
+p, li { line-height: 1.8; }
+li { margin: 5px 0; }
+.actions { display: flex; gap: 16px; flex-wrap: wrap; margin: 28px 0; align-items: center; }
+button, .button { font: inherit; padding: 12px 20px; border-radius: 8px; border: 1px solid transparent; text-decoration: none; cursor: pointer; background: #205bcc; color: white; }
+.secondary { background: transparent; color: light-dark(#194caa, #adcaff); border-color: currentColor; }
+button:disabled { opacity: .6; cursor: wait; }
+:focus-visible { outline: 3px solid light-dark(#122e6c, #c9deff); outline-offset: 4px; }
+[hidden] { display: none !important; }
+pre { padding: 16px; background: light-dark(#edf1f7, #131c28); border-radius: 8px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.note { font-size: .9rem; color: light-dark(#4d5e73, #bbcadc); margin-top: 32px; }
+@media (max-width: 700px) { main { margin: 12px; padding: 22px; } }

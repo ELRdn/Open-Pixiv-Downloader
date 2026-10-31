@@ -1,0 +1,11 @@
+{
+  "command": [
+    "python3",
+    "run_tests.py"
+  ],
+  "exit_code": 0,
+  "reported_test_count": 33,
+  "python_version": "3.12.14",
+  "platform": "linux",
+  "scope": "upstream synthetic/mocked tests; no live compatibility claim"
+}

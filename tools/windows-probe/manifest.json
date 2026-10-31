@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Open Pixiv Downloader — 保存診断",
+  "version": "0.1.0",
+  "description": "指定した4作品のメタデータを、通常の閲覧セッションで確認するローカル診断ツール。",
+  "minimum_chrome_version": "102",
+  "permissions": ["activeTab", "scripting"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_title": "指定4作品の保存診断を開く"}
+}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pixiv 保存診断</title>
+  <link rel="stylesheet" href="report.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">OPEN PIXIV DOWNLOADER</p>
+  <h1>4作品の保存診断</h1>
+  <p>普段Pixivを閲覧している状態で、作品のページ数・小説の構造・挿絵・フレーム情報を確認します。</p>
+  <p>レポートにはCookie・パスワード・小説本文を含めません。画像やZIPの本体は取得しません。</p>
+  <ul>
+    <li>イラスト：149564947</li>
+    <li>漫画：130117333（全ページを確認）</li>
+    <li>小説：29476682</li>
+    <li>うごイラ：151427872</li>
+  </ul>
+  <p>約30秒が目安です。処理中は、元のPixivタブとこのタブを開いたままにしてください。</p>
+  <div class="actions">
+    <button id="start" type="button">検証を開始</button>
+    <a id="save" class="button secondary" download="pixiv-validation-report.json" hidden>レポートを保存</a>
+  </div>
+  <p id="status" role="status" aria-live="polite">Pixivのページ上で拡張アイコンを押して開いてください。</p>
+  <details id="details" hidden>
+    <summary>レポートの内容を確認</summary>
+    <pre id="result"></pre>
+  </details>
+  <p class="note">403・429や確認画面が返った場合は停止し、停止理由だけを記録します。メタデータの確認完了は、作品の完全保存や媒体の破損検査が完了した意味ではありません。</p>
+</main>
+<script type="module" src="report.js"></script>
+</body>
+</html>

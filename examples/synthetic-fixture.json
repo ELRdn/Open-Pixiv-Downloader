@@ -1,0 +1,213 @@
+{
+  "synthetic": true,
+  "description": "Entirely generated offline fixture; no real creative works, credentials, or live media URLs.",
+  "targets": [
+    "user:9001",
+    "art:1001",
+    "art:1002",
+    "art:1003",
+    "novel:1004",
+    "series:8001"
+  ],
+  "responses": {
+    "/ajax/user/9001/profile/all": {
+      "illusts": {
+        "1001": null,
+        "1003": null
+      },
+      "manga": {
+        "1002": null
+      },
+      "novels": {
+        "1004": null
+      }
+    },
+    "/ajax/illust/1001": {
+      "userId": "9001",
+      "userName": "合成サンプル作者",
+      "xRestrict": 0,
+      "restrict": 0,
+      "isUnlisted": false,
+      "createDate": "2026-01-01T00:00:00+09:00",
+      "uploadDate": "2026-01-02T00:00:00+09:00",
+      "tags": {
+        "tags": [
+          {
+            "tag": "synthetic-fixture"
+          },
+          {
+            "tag": "架空の作品"
+          }
+        ]
+      },
+      "id": "1001",
+      "title": "合成イラスト",
+      "illustType": 0,
+      "pageCount": 1
+    },
+    "/ajax/illust/1001/pages": [
+      {
+        "urls": {
+          "original": "https://i.pximg.net/synthetic/pixiv-archive-lab/1001_p0.png"
+        },
+        "width": 24,
+        "height": 16
+      }
+    ],
+    "/ajax/illust/1002": {
+      "userId": "9001",
+      "userName": "合成サンプル作者",
+      "xRestrict": 0,
+      "restrict": 0,
+      "isUnlisted": false,
+      "createDate": "2026-01-01T00:00:00+09:00",
+      "uploadDate": "2026-01-02T00:00:00+09:00",
+      "tags": {
+        "tags": [
+          {
+            "tag": "synthetic-fixture"
+          },
+          {
+            "tag": "架空の作品"
+          }
+        ]
+      },
+      "id": "1002",
+      "title": "合成漫画・二ページ",
+      "illustType": 1,
+      "pageCount": 2
+    },
+    "/ajax/illust/1002/pages": [
+      {
+        "urls": {
+          "original": "https://i.pximg.net/synthetic/pixiv-archive-lab/1002_p0.png"
+        },
+        "width": 24,
+        "height": 16
+      },
+      {
+        "urls": {
+          "original": "https://i.pximg.net/synthetic/pixiv-archive-lab/1002_p1.png"
+        },
+        "width": 24,
+        "height": 16
+      }
+    ],
+    "/ajax/illust/1003": {
+      "userId": "9001",
+      "userName": "合成サンプル作者",
+      "xRestrict": 0,
+      "restrict": 0,
+      "isUnlisted": false,
+      "createDate": "2026-01-01T00:00:00+09:00",
+      "uploadDate": "2026-01-02T00:00:00+09:00",
+      "tags": {
+        "tags": [
+          {
+            "tag": "synthetic-fixture"
+          },
+          {
+            "tag": "架空の作品"
+          }
+        ]
+      },
+      "id": "1003",
+      "title": "合成うごイラ",
+      "illustType": 2,
+      "pageCount": 1
+    },
+    "/ajax/illust/1003/ugoira_meta": {
+      "src": "https://i.pximg.net/synthetic/pixiv-archive-lab/1003_ugoira.zip",
+      "originalSrc": "https://i.pximg.net/synthetic/pixiv-archive-lab/1003_ugoira.zip",
+      "mime_type": "image/png",
+      "frames": [
+        {
+          "file": "000000.png",
+          "delay": 80
+        },
+        {
+          "file": "000001.png",
+          "delay": 125
+        }
+      ]
+    },
+    "/ajax/novel/1004": {
+      "userId": "9001",
+      "userName": "合成サンプル作者",
+      "xRestrict": 0,
+      "restrict": 0,
+      "isUnlisted": false,
+      "createDate": "2026-01-01T00:00:00+09:00",
+      "uploadDate": "2026-01-02T00:00:00+09:00",
+      "tags": {
+        "tags": [
+          {
+            "tag": "synthetic-fixture"
+          },
+          {
+            "tag": "架空の作品"
+          }
+        ]
+      },
+      "id": "1004",
+      "title": "合成小説・二人の地図",
+      "content": "[chapter:合成テスト・第一章 [[rb:出発>しゅっぱつ]]]\nこれはオフライン検証のためだけに書いた、架空の短い物語です。\n[b:あおい]は机の上に[i:小さな地図]を置きました。\n[[emphasismark:必ず帰ろう>﹅]]と、二人で約束します。\n[uploadedimage:7001]\n[jump:2]\n[newpage][chapter:合成テスト・第二章]\n二ページ目には、承認済みという設定の合成漫画を挿入します。\n[pixivimage:1002-2]\n[[jumpuri:関連作品>https://www.pixiv.net/artworks/1002]]\n文字としての <script>alert('synthetic')</script> も安全に表示します。\n[unknown:この未対応記法も原文には残ります]\n",
+      "coverUrl": "https://i.pximg.net/synthetic/pixiv-archive-lab/1004_cover.png",
+      "seriesNavData": {
+        "seriesId": "8001",
+        "title": "合成シリーズ",
+        "order": 1,
+        "prev": null,
+        "next": null
+      },
+      "textEmbeddedImages": {
+        "7001": {
+          "id": "7001",
+          "sl": 2,
+          "urls": {
+            "original": "https://i.pximg.net/synthetic/pixiv-archive-lab/7001.png"
+          }
+        }
+      }
+    },
+    "/ajax/novel/1004/insert_illusts?id%5B%5D=1002-2": {
+      "1002-2": {
+        "visible": true,
+        "illust": {
+          "id": "1002",
+          "xRestrict": 0,
+          "restrict": 0,
+          "images": {
+            "original": "https://i.pximg.net/synthetic/pixiv-archive-lab/1002_p1.png"
+          }
+        }
+      }
+    },
+    "/ajax/novel/series/8001": {
+      "id": "8001",
+      "title": "合成シリーズ",
+      "userId": "9001",
+      "xRestrict": 0,
+      "restrict": 0
+    },
+    "/ajax/novel/series_content/8001?limit=30&last_order=0&order_by=asc": {
+      "page": {
+        "seriesContents": [
+          {
+            "id": "1004",
+            "order": 1,
+            "title": "合成小説・二人の地図"
+          }
+        ]
+      }
+    }
+  },
+  "assets": {
+    "https://i.pximg.net/synthetic/pixiv-archive-lab/1001_p0.png": "iVBORw0KGgoAAAANSUhEUgAAABgAAAAQCAIAAACDRijCAAAAJ0lEQVR42mNIWfABjsyLD8MRqeIMw9ggSjQjiw9ng0bT0Wg6ooJBAH85iN8sR9UkAAAAAElFTkSuQmCC",
+    "https://i.pximg.net/synthetic/pixiv-archive-lab/1002_p0.png": "iVBORw0KGgoAAAANSUhEUgAAABgAAAAQCAIAAACDRijCAAAAJ0lEQVR42mM40bQAjmaHFsMRqeIMw9ggSjQjiw9ng0bT0Wg6ooJBAFNKed9NayRUAAAAAElFTkSuQmCC",
+    "https://i.pximg.net/synthetic/pixiv-archive-lab/1002_p1.png": "iVBORw0KGgoAAAANSUhEUgAAABgAAAAQCAIAAACDRijCAAAAJ0lEQVR42mPoOTENjuJnZ8IRqeIMw9ggSjQjiw9ng0bT0Wg6ooJBAAhKed8v7+E2AAAAAElFTkSuQmCC",
+    "https://i.pximg.net/synthetic/pixiv-archive-lab/1003_ugoira.zip": "UEsDBBQAAAAIAAAAISiZktCdXgAAAGAAAAAKAAAAMDAwMDAwLnBuZ+sM8HPn5ZLiYmBg4PX0cAkC0hJALMDBBCSb3TQOASl1TxfHkIpbyTs2qzL0XduufVhw5SOewzcUvEyUu/nTm90uX8ywWtTkyLDeJ+v+85NHm4FaGDxd/VzWOSU0AQBQSwMEFAAAAAgAAAAhKGPx9Z5eAAAAYAAAAAoAAAAwMDAwMDEucG5n6wzwc+flkuJiYGDg9fRwCQLSEkAswMEEJJvdNA4BKXVPF8eQilvJN4I+8vTd2lt+SHDlI57DNxS8TJS7+dOb3S5fzLBa1OTIsMVp6/2WFQ/2AbUweLr6uaxzSmgCAFBLAQIUAxQAAAAIAAAAISiZktCdXgAAAGAAAAAKAAAAAAAAAAAAAACkgQAAAAAwMDAwMDAucG5nUEsBAhQDFAAAAAgAAAAhKGPx9Z5eAAAAYAAAAAoAAAAAAAAAAAAAAKSBhgAAADAwMDAwMS5wbmdQSwUGAAAAAAIAAgBwAAAADAEAAAAA",
+    "https://i.pximg.net/synthetic/pixiv-archive-lab/1004_cover.png": "iVBORw0KGgoAAAANSUhEUgAAABgAAAAQCAIAAACDRijCAAAAJ0lEQVR42mNYsOAOHBUXr4cjUsUZhrFBlGhGFh/OBo2mo9F0RAWDAN9AxN/bXJtDAAAAAElFTkSuQmCC",
+    "https://i.pximg.net/synthetic/pixiv-archive-lab/7001.png": "iVBORw0KGgoAAAANSUhEUgAAABgAAAAQCAIAAACDRijCAAAAJ0lEQVR42mOoOHEJjrxnL4UjUsUZhrFBlGhGFh/OBo2mo9F0RAWDAHhCtd/1ORLNAAAAAElFTkSuQmCC"
+  }
+}

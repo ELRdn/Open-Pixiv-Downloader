@@ -1,0 +1,221 @@
+[
+  {
+    "name": "archive-lab",
+    "original_name": "pixiv-archive-lab-0.1.0a1.zip",
+    "archive_sha256": "7b9ee8afd0557f904b4e1791ae5a0ad002728f7d701a94a50332e0e72bea6777",
+    "files": [
+      {
+        "path": "pixiv-archive-lab/.gitignore",
+        "bytes": 139,
+        "sha256": "c02dccb17b22863662164bcb9fc04a618e0b3ee53d0538acb92f99ae0a81c56f"
+      },
+      {
+        "path": "pixiv-archive-lab/LICENSE",
+        "bytes": 1087,
+        "sha256": "629c8d12463d20b207053b7825643c5b74de6a7bd0a81664e20449a07112893c"
+      },
+      {
+        "path": "pixiv-archive-lab/NOTICE.md",
+        "bytes": 1733,
+        "sha256": "3d2a9263025106793962f55804a78a0feb89cfe83a97ac59245a090f51e42d2b"
+      },
+      {
+        "path": "pixiv-archive-lab/README.md",
+        "bytes": 9606,
+        "sha256": "65a20aa3fbe1d47f57a96b566436e7faa2723e4e49fb498679439c3ad2f4e1e3"
+      },
+      {
+        "path": "pixiv-archive-lab/docs/RESEARCH_JA.md",
+        "bytes": 37562,
+        "sha256": "0e171d23f64f9ebd68e3ddb846272e246febda98869e1321858cc3bec88ec6da"
+      },
+      {
+        "path": "pixiv-archive-lab/docs/VALIDATION.md",
+        "bytes": 3107,
+        "sha256": "26fb6ec5dfeb44d05e61682002ce622c6eca7f787e3b4f2700262d51cc3fe116"
+      },
+      {
+        "path": "pixiv-archive-lab/examples/make_fixture.py",
+        "bytes": 6883,
+        "sha256": "59a0291761c67e0453d13979b5088bff6191e68a82976ee1f5496dabedf53cfe"
+      },
+      {
+        "path": "pixiv-archive-lab/examples/synthetic-fixture.json",
+        "bytes": 7278,
+        "sha256": "2d920d092885f38a6ea3963033d674591d182cfd58cac3ae669929f390bac2cc"
+      },
+      {
+        "path": "pixiv-archive-lab/pyproject.toml",
+        "bytes": 496,
+        "sha256": "3b80ebd7b17faf0716427dc7224382a3276a7708c973788591b2258817c50ffc"
+      },
+      {
+        "path": "pixiv-archive-lab/run.py",
+        "bytes": 224,
+        "sha256": "0f336adb50bb6fa9df4dad03f76ed87881a171878cce6fb313b6ebb342b0826e"
+      },
+      {
+        "path": "pixiv-archive-lab/run_tests.py",
+        "bytes": 373,
+        "sha256": "a235d2e89706ffb44338feb61526ec743b276b53b948862f12937da8606770da"
+      },
+      {
+        "path": "pixiv-archive-lab/src/pixiv_archive/__init__.py",
+        "bytes": 90,
+        "sha256": "222b8905b20988a283cca7bd9b9b81520d0ade0eef0495b11df50ff7b6967457"
+      },
+      {
+        "path": "pixiv-archive-lab/src/pixiv_archive/__main__.py",
+        "bytes": 48,
+        "sha256": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
+      },
+      {
+        "path": "pixiv-archive-lab/src/pixiv_archive/archive.py",
+        "bytes": 23983,
+        "sha256": "8815b09d4dc3122bbba210c2071b9dae8b15b1711bb52dfad0fc4ada6b0b6ac0"
+      },
+      {
+        "path": "pixiv-archive-lab/src/pixiv_archive/cli.py",
+        "bytes": 7042,
+        "sha256": "98b690ff021ef5232721d509968d9b9c3c181006f8870f1eb9bc0248a50a8900"
+      },
+      {
+        "path": "pixiv-archive-lab/src/pixiv_archive/net.py",
+        "bytes": 9966,
+        "sha256": "c52570ceed7f848cb8581c35064d4c6178b5c27fb4c0695daf5c2fd559c0e7df"
+      },
+      {
+        "path": "pixiv-archive-lab/src/pixiv_archive/novel.py",
+        "bytes": 13799,
+        "sha256": "5ecd131c660cfda0b777b8dd594a684ad48a7219f956f4d5d21242ed6047b4f2"
+      },
+      {
+        "path": "pixiv-archive-lab/tests/test_archive.py",
+        "bytes": 10263,
+        "sha256": "777050013fbc2727f957f3f96b3cad3b1b98ed2f046184838581e11747536cd4"
+      },
+      {
+        "path": "pixiv-archive-lab/tests/test_net.py",
+        "bytes": 5634,
+        "sha256": "d87c7dffdc954f72ae214dc9ffbbeb0821b69dd52f0fadd41dfd691fbd611377"
+      },
+      {
+        "path": "pixiv-archive-lab/tests/test_novel.py",
+        "bytes": 6523,
+        "sha256": "f33ee6120dbbbdee59a6f976e172040e0dce690256eacd6a6610e704d630e1c0"
+      }
+    ]
+  },
+  {
+    "name": "PxArchive",
+    "original_name": "PxArchive-v0.1.0-alpha.zip",
+    "archive_sha256": "d72ff9b98bee66cfd611c203ae4bd46d6f67ce3376c36c606cc04a269de2a04f",
+    "files": [
+      {
+        "path": "pyproject.toml",
+        "bytes": 840,
+        "sha256": "f006f994a11470b351e433679c5e6c69827a82b1c578f958e4233d16fa558962"
+      },
+      {
+        "path": "README.md",
+        "bytes": 7907,
+        "sha256": "c25ac8d14ec4dc3d78a41bfbfca5386ef2a4a4632131ea2e2a009d409951d601"
+      },
+      {
+        "path": "REVERSE_ENGINEERING.md",
+        "bytes": 9624,
+        "sha256": "5aa260e329c0f59e4e5849b9561a259ba90337d6a12f6463bae62fad867fae79"
+      },
+      {
+        "path": "SECURITY.md",
+        "bytes": 1359,
+        "sha256": "e9d8e098575fb29782f48e1d7b0268a1a4471f10bbe770f8745bbfcf75d10617"
+      },
+      {
+        "path": "CONTRIBUTING.md",
+        "bytes": 910,
+        "sha256": "7653257d73e7d134a02f1bc32e6d9a61c85c8245c5040c29b9d3e0f6b9999c32"
+      },
+      {
+        "path": "LICENSE",
+        "bytes": 1080,
+        "sha256": "633165d4c38a8207245f593366ad84ccdf35bde767aabf14df5c79fb149680c6"
+      },
+      {
+        "path": ".gitignore",
+        "bytes": 126,
+        "sha256": "d5a35b88dbe15c3a464056ef600b1390b6e94780779d3af6c9a248fe6e038d8e"
+      },
+      {
+        "path": ".github/workflows/test.yml",
+        "bytes": 397,
+        "sha256": "cf27c08a287a3d15759c7d42c91af2f92a55205326a0a70f805107bbb369ba30"
+      },
+      {
+        "path": "pxarchive/__main__.py",
+        "bytes": 80,
+        "sha256": "6a170fc866c867a1e5812daad308396f0940a23f2ecf55e56be39d5d67d23f10"
+      },
+      {
+        "path": "pxarchive/static/index.html",
+        "bytes": 13631,
+        "sha256": "fe57415cba3b6e5455b968050414a176e305e44d42c41019d0198ffce8f9a9d2"
+      },
+      {
+        "path": "pxarchive/api.py",
+        "bytes": 9657,
+        "sha256": "da7ddb44466e8453f7d27a518923e94c11b5d7059674d8ad27a96d6f4baeb8df"
+      },
+      {
+        "path": "pxarchive/cli.py",
+        "bytes": 4177,
+        "sha256": "2365f8e4b3b3187ecacf8dd0b24fe9b5bcc7bf43b4c8a7c06ac569db4788ed17"
+      },
+      {
+        "path": "pxarchive/web.py",
+        "bytes": 10127,
+        "sha256": "02da7b2a12ae7ae0cf7274c8db8775ef92621bd371a2ea60fdc45309ec4ec8e9"
+      },
+      {
+        "path": "pxarchive/archive.py",
+        "bytes": 16775,
+        "sha256": "28c9e87d6dcbeea6861aaa215eba8f9b41859267679a9b8726725623170e0328"
+      },
+      {
+        "path": "pxarchive/__init__.py",
+        "bytes": 103,
+        "sha256": "703ffeb0fa2cc3ae419013b0e8aeded5538155379abd6973d35b6dd7519f623e"
+      },
+      {
+        "path": "pxarchive/novel.py",
+        "bytes": 5405,
+        "sha256": "65d561ba8dfd6a2187a19ed43e08053075d32a733664598cbe693140c3b10bbe"
+      },
+      {
+        "path": "tests/test_api.py",
+        "bytes": 3829,
+        "sha256": "b1aa7732ca8fcae1c7fbe2abe8a15379a6feb323c1df1e437326692b9cafafc3"
+      },
+      {
+        "path": "tests/test_novel.py",
+        "bytes": 1754,
+        "sha256": "b8292d48b64984b6d20d9341f7283f450c4b0ab187a308014e4e1bed2af7b610"
+      },
+      {
+        "path": "tests/test_archive.py",
+        "bytes": 4216,
+        "sha256": "562b6afdf11b2ba27d28ad088017cf4b07ed4bdd872d541b86062d58d1387fad"
+      },
+      {
+        "path": "tests/test_web.py",
+        "bytes": 644,
+        "sha256": "3ae3534b4f328ec66f4c06c66e7b551335400fc464d59dbaa17bdb55953322a8"
+      },
+      {
+        "path": "dist/pxarchive_local-0.1.0-py3-none-any.whl",
+        "bytes": 28396,
+        "sha256": "c569dc00ded282ea50d53dcec01318cf2686da4647aacf0b4279170b816c52f4"
+      }
+    ]
+  }
+]

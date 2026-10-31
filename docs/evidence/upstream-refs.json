@@ -1,0 +1,26 @@
+[
+  {
+    "project": "Powerful-Pixiv-Downloader",
+    "url": "https://github.com/xuejianxianzun/PixivBatchDownloader",
+    "commit": "2e137d0b45f4bc897f0792994dfa7176884922ce",
+    "branch": "refs/heads/master"
+  },
+  {
+    "project": "gallery-dl",
+    "url": "https://github.com/mikf/gallery-dl",
+    "commit": "175d21fd8f7e52963911c02916d0634461cddb24",
+    "branch": "refs/heads/master"
+  },
+  {
+    "project": "PixivUtil2",
+    "url": "https://github.com/Nandaka/PixivUtil2",
+    "commit": "46bb910cd60c213c9199d939859670a044450239",
+    "branch": "refs/heads/master"
+  },
+  {
+    "project": "PixivPy",
+    "url": "https://github.com/upbit/pixivpy",
+    "commit": "4f2e9ea7fff6247d9f5bfe5a862e92c5dfe3b6dd",
+    "branch": "refs/heads/master"
+  }
+]

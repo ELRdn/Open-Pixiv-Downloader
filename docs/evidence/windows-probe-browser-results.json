@@ -1,0 +1,14 @@
+{
+  "runtime": "Linux Chromium",
+  "browser_version": "154.0.8037.57",
+  "live_pixiv_used": false,
+  "native_browser_collector": "passed",
+  "same_origin_session": "passed",
+  "stop_on_403": "passed",
+  "report_ui_with_test_chrome_api": "passed",
+  "report_download": "passed",
+  "page_errors": [],
+  "extension_installation": "blocked_by_administrator_policy",
+  "extension_installation_error": "Loading of unpacked extensions is disabled by the administrator.",
+  "windows_and_live_pixiv": "not_run"
+}
