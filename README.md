@@ -6,8 +6,8 @@
 
 ## このリポジトリの内容
 
-- `src/pixiv_archive/`：比較で基盤に選んだ **Pixiv Archive Lab 0.1.0a1** の保存コア。元のコードとテストを維持しています。パッケージ名とCLI名も元のものです。
-- `examples/`、`tests/`：実作品を含まない合成データと既存の33テスト。
+- `src/pixiv_archive/`：**Pixiv Archive Lab 0.1.0a1** を基盤に、一括入力と並列保存を追加したPython製CLI。パッケージ名とCLI名は元のものです。
+- `examples/`、`tests/`：実作品を含まない合成データ、既存33件と追加7件のテスト。
 - [Windows診断拡張](tools/windows-probe/README_JA.md)：指定4作品のメタデータを通常の閲覧セッションで確認するEdge／Chrome用補助ツール。
 - [計画](docs/PLAN_JA.md)、[OSS比較](docs/COMPARISON_JA.md)、[α版の採用判断](docs/ALPHA_REVIEW_JA.md)、[現在の検証状況](docs/STATUS_JA.md)。
 
@@ -29,7 +29,28 @@ python run_tests.py
 node --test tools/windows-probe/collector.test.mjs
 ```
 
-Node.jsは診断拡張の開発用テストにだけ必要です。Pythonコアのテストは33件、診断処理のテストは8件です。Linuxでの実行結果であり、Windows対応の証明ではありません。
+Node.jsは診断拡張の開発用テストにだけ必要です。Pythonコアのテストは40件、診断処理のテストは8件です。Linuxでの実行結果であり、Windows対応の証明ではありません。
+
+## URLをまとめて指定する
+
+引数に複数の作品・作者・シリーズURLを指定するか、UTF-8のテキストファイルに1行1URLで記載します。両方を併用でき、重複する作品は1回だけ処理します。空行と `#` で始まるコメント行は無視します。
+
+```sh
+# 同梱データで作者・単体作品を混ぜ、2作品を並列保存する
+python run.py fetch user:9001 art:1001 --fixture examples/synthetic-fixture.json --all --jobs 2 --out demo-archive
+
+# 実サイト用の書式例：urls.txtに作品・作者のURLを記載する
+python run.py plan --input urls.txt --online --all --out archive
+python run.py fetch --input urls.txt --online --all --jobs 2 --out archive
+```
+
+作者URLは `https://www.pixiv.net/users/作者ID` の形式です。列挙できたイラスト・漫画・うごイラ・小説を対象にします。`--types novel` または `--types art` で絞り込めます。
+
+`--jobs` は1〜4（既定1）。媒体の転送を重ねても、リクエスト開始間隔と要求予算は全ワーカーで共有します。401・403・429等で停止を共有し、後続を投入しません。`--all` は作品数の選択上限を外しますが、要求予算は維持し、残りは未完了として記録します。同じコマンドを再実行すると検査済みの作品をスキップして続きを進めます。
+
+実サイトの経路は匿名取得のみで、通常セッションとの連携は未完成です。`--all` は、閲覧条件で見えない作品や削除済み作品まで取得できる意味ではありません。
+
+[CLI・GUI・Rustの開発方針](docs/PRODUCT_DIRECTION_JA.md)も参照してください。
 
 ## Windowsでのメタデータ診断
 

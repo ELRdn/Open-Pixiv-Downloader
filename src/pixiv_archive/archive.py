@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import threading
 import urllib.parse
 import zipfile
 from dataclasses import dataclass
@@ -188,6 +189,7 @@ class Archive:
         root.mkdir(parents=True, exist_ok=True)
         self.root = root.resolve()
         self.client = client
+        self._db_lock = threading.RLock()
         self.lock = safe_path(self.root, ".run.lock")
         try:
             fd = os.open(self.lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -196,7 +198,7 @@ class Archive:
         try:
             with os.fdopen(fd, "w") as output:
                 output.write(str(os.getpid()))
-            self.db = sqlite3.connect(safe_path(self.root, "state.sqlite3"))
+            self.db = sqlite3.connect(safe_path(self.root, "state.sqlite3"), check_same_thread=False)
             self.db.execute("""CREATE TABLE IF NOT EXISTS works (
                 kind TEXT NOT NULL, id TEXT NOT NULL, status TEXT NOT NULL,
                 updated_at TEXT NOT NULL, reason TEXT,
@@ -219,10 +221,11 @@ class Archive:
         self.close()
 
     def state(self, ref: WorkRef, status: str, reason: str | None = None):
-        self.db.execute("INSERT INTO works VALUES (?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET "
-                        "status=excluded.status,updated_at=excluded.updated_at,reason=excluded.reason",
-                        (ref.kind, ref.id, status, now(), reason))
-        self.db.commit()
+        with self._db_lock:
+            self.db.execute("INSERT INTO works VALUES (?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET "
+                            "status=excluded.status,updated_at=excluded.updated_at,reason=excluded.reason",
+                            (ref.kind, ref.id, status, now(), reason))
+            self.db.commit()
 
     def _path(self, ref: WorkRef, relative: str) -> Path:
         return safe_path(self.root, f"works/{ref.key}/{relative}")
@@ -251,13 +254,15 @@ class Archive:
         return problems
 
     def is_complete(self, ref: WorkRef) -> bool:
-        row = self.db.execute("SELECT status FROM works WHERE kind=? AND id=?", (ref.kind, ref.id)).fetchone()
+        with self._db_lock:
+            row = self.db.execute("SELECT status FROM works WHERE kind=? AND id=?", (ref.kind, ref.id)).fetchone()
         manifest = self.manifest(ref)
         return bool(row and row[0] == "complete" and manifest and
                     manifest.get("status") == "complete" and not self.check(ref))
 
     def status(self, ref: WorkRef) -> str | None:
-        row = self.db.execute("SELECT status FROM works WHERE kind=? AND id=?", (ref.kind, ref.id)).fetchone()
+        with self._db_lock:
+            row = self.db.execute("SELECT status FROM works WHERE kind=? AND id=?", (ref.kind, ref.id)).fetchone()
         return row[0] if row else None
 
     def save(self, ref: WorkRef) -> str:

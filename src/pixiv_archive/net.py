@@ -8,6 +8,7 @@ import json
 import math
 import os
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -71,14 +72,35 @@ class HttpClient:
         self.max_file_bytes = max_file_bytes
         self.requests = 0
         self._last_start = 0.0
+        self._request_lock = threading.RLock()
+        self._stopped = threading.Event()
         self._opener = urllib.request.build_opener(_NoRedirect())
 
+    def cancel(self):
+        self._stopped.set()
+
     def _open(self, url: str, asset: bool = False):
+        # Serialize request admission, including budgets and response headers.
+        # Media bodies are read outside this lock and may overlap.
+        with self._request_lock:
+            if self._stopped.is_set():
+                raise RemoteStop("Job stopped; no further requests will be sent")
+            try:
+                return self._open_locked(url, asset)
+            except RemoteStop:
+                self.cancel()
+                raise
+
+    def _open_locked(self, url: str, asset: bool = False):
         validate_url(url, asset=asset)
         for attempt in range(3):
+            if self._stopped.is_set():
+                raise RemoteStop("Job stopped; no further requests will be sent")
             if self.requests >= self.request_budget:
                 raise RemoteStop("Request budget reached; completed works remain saved")
             time.sleep(max(0.0, self.interval - (time.monotonic() - self._last_start)))
+            if self._stopped.is_set():
+                raise RemoteStop("Job stopped while waiting for request admission")
             self._last_start = time.monotonic()
             self.requests += 1
             request = urllib.request.Request(url, headers={
@@ -122,6 +144,13 @@ class HttpClient:
 
     def api(self, path: str, query: list[tuple[str, str]] | None = None):
         try:
+            return self._api(path, query)
+        except RemoteStop:
+            self.cancel()
+            raise
+
+    def _api(self, path, query):
+        try:
             with self._open(api_url(path, query)) as response:
                 data = response.read(16 * 1024 * 1024 + 1)
         except (http.client.HTTPException, urllib.error.URLError, OSError) as exc:
@@ -139,6 +168,13 @@ class HttpClient:
         return payload["body"]
 
     def download(self, url: str, path: Path) -> dict:
+        try:
+            return self._download(url, path)
+        except RemoteStop:
+            self.cancel()
+            raise
+
+    def _download(self, url, path):
         validate_url(url, asset=True)
         digest = hashlib.sha256()
         total = 0
@@ -159,6 +195,8 @@ class HttpClient:
                     if expected < 1 or expected > self.max_file_bytes:
                         raise ArchiveError("Resource size exceeds the configured limit or is empty")
                 while chunk := response.read(128 * 1024):
+                    if self._stopped.is_set():
+                        raise RemoteStop("Job stopped during media transfer")
                     if total == 0 and chunk.lstrip().lower().startswith((b"<!doctype html", b"<html")):
                         raise RemoteStop("Expected media; received HTML")
                     total += len(chunk)
@@ -183,10 +221,21 @@ class FixtureClient:
     def __init__(self, fixture: Path):
         self.data = json.loads(fixture.read_text(encoding="utf-8"))
         self.requests = 0
+        self._request_lock = threading.Lock()
+        self._stopped = threading.Event()
+
+    def cancel(self):
+        self._stopped.set()
+
+    def _admit(self):
+        with self._request_lock:
+            if self._stopped.is_set():
+                raise RemoteStop("Synthetic job stopped")
+            self.requests += 1
 
     def api(self, path: str, query: list[tuple[str, str]] | None = None):
         key = api_url(path, query).removeprefix("https://www.pixiv.net")
-        self.requests += 1
+        self._admit()
         if key not in self.data["responses"]:
             raise Unavailable(f"Synthetic fixture has no response for {path}")
         # Match HttpClient's unwrapped body contract; no external request is ever made.
@@ -194,7 +243,7 @@ class FixtureClient:
 
     def download(self, url: str, path: Path) -> dict:
         validate_url(url, asset=True)
-        self.requests += 1
+        self._admit()
         if url not in self.data["assets"]:
             raise Unavailable("Synthetic fixture has no asset")
         data = base64.b64decode(self.data["assets"][url], validate=True)
