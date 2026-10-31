@@ -18,6 +18,13 @@ statement, not a formal clean-room certification by this repository.
 The Windows metadata probe is an additional MIT-licensed diagnostic tool.
 Its notice is in [tools/windows-probe/LICENSE](tools/windows-probe/LICENSE).
 
+The current Rust implementation in `rust/` ports the MIT Python archive contract
+and novel renderer, and adds a Ratatui interface and complete ugoira ZIP reads
+for CRC validation. It does not invoke the Python implementation at runtime.
+The terminal wordmark uses character patterns defined in this project. Cargo
+dependencies retain their own licenses; exact resolved versions are recorded
+in `Cargo.lock`.
+
 The comparison examined fixed revisions of other projects. Their source trees,
 package caches, credentials, and downloaded Pixiv works are not included here.
 See [the comparison](docs/COMPARISON_JA.md) for exact revisions and license

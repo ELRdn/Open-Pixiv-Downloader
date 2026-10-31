@@ -1,0 +1,40 @@
+{
+  "date": "2026-10-31",
+  "platform": "x86_64-unknown-linux-gnu",
+  "rustc": "1.99.1",
+  "ratatui": "0.29.0",
+  "crossterm": "0.28.1",
+  "rust_tests": {"passed": 25, "failed": 0},
+  "legacy_python_tests": {"passed": 49, "failed": 0},
+  "fmt": "passed",
+  "clippy_all_targets_deny_warnings": "passed",
+  "release_build": "passed",
+  "cargo_install_local": "passed",
+  "archive_compatibility": {
+    "method": "tools/check_rust_compat.py with embedded synthetic fixture",
+    "rust_to_python_verify_resume_export": "passed",
+    "python_to_rust_verify_resume_export": "passed",
+    "original_bytes_and_declared_file_sets": "matched",
+    "corruption_repair_and_legacy_verification": "passed"
+  },
+  "terminal_smoke": {
+    "backend": "real Linux PTY",
+    "columns": 120,
+    "rows": 36,
+    "bracketed_paste_16_urls_and_cancel_confirmation": "passed",
+    "demo_save": {"complete": 4},
+    "result_detail_view": "passed",
+    "verify": {"valid": 4},
+    "zip_export": "passed",
+    "clean_exit": "passed",
+    "preview": "../images/ratatui-welcome.png",
+    "preview_method": "actual PTY output decoded into terminal cells and rendered to PNG"
+  },
+  "not_verified": [
+    "Native Windows installation, display and input",
+    "Live Pixiv work API and media compatibility",
+    "Authenticated user session integration",
+    "All novel syntax and independent media decoder validation"
+  ],
+  "not_implemented": ["Update detection and revision retention", "GUI"]
+}

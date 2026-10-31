@@ -14,7 +14,6 @@ dependencies = []
 
 [project.scripts]
 pixiv-archive = "pixiv_archive.cli:main"
-opixiv = "pixiv_archive.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 node_modules/
 build/
+target/
 dist/
 archive/
 demo-archive/

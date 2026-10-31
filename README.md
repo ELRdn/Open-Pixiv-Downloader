@@ -1,111 +1,108 @@
 # Open Pixiv Downloader
 
-イラスト・漫画・うごイラ・小説を、欠損や破損を確認しながらローカルへ保存するための開発中プロジェクトです。Windowsを優先し、小説の構造、再開、更新検出、旧版保持を重視します。
+**Rust + Ratatui** のローカル保存ツールです。大きな立体文字のロゴから起動し、作品・作者・小説シリーズのURLをまとめて入力できます。Windowsを優先して開発しています。
 
-**現在は研究用α版です。実サイトでの4形式の取得、Windows実機、更新検出・旧版保持は未検証または未実装です。** Pixivの公式製品ではありません。
+![Rust + Ratatuiの起動画面](docs/images/ratatui-welcome.png)
 
-## このリポジトリの内容
+*実際のLinux端末出力を120桁×36行で取得し、レンダリングした表示例です。Windows実機のスクリーンショットではありません。*
 
-- `src/pixiv_archive/`：**Pixiv Archive Lab 0.1.0a1** を基盤に、一括入力と並列保存を追加したPython製CLI。パッケージ名とCLI名は元のものです。
-- `examples/`、`tests/`：実作品を含まない合成データと49件のPythonテスト。
-- [Windows診断拡張](tools/windows-probe/README_JA.md)：指定4作品のメタデータを通常の閲覧セッションで確認するEdge／Chrome用補助ツール。
-- [計画](docs/PLAN_JA.md)、[OSS比較](docs/COMPARISON_JA.md)、[α版の採用判断](docs/ALPHA_REVIEW_JA.md)、[現在の検証状況](docs/STATUS_JA.md)。
+研究用α版です。実サイトでの4形式の取得、本人セッションとの連携、Windows実機の操作は未検証です。更新検出・旧版保持は未実装です。Pixivの公式製品ではありません。
 
-## 起動する
+## 起動
 
-PowerShellでリポジトリのフォルダーを開き、次だけ実行します。
+[Rustの現行stable版](https://www.rust-lang.org/tools/install)を用意し、PowerShellでリポジトリのフォルダーを開きます。Windowsでソースからビルドする場合は、Rustの案内に従いVisual Studio Build ToolsのC++ビルド環境も導入してください。
 
 ```powershell
-python run.py
+git pull
+cargo install --path . --locked
+opixiv
 ```
 
-![起動画面の表示イメージ](docs/images/terminal-welcome.png)
+インストールせず試す場合は `cargo run --release --locked`。以後の更新は `git pull` の後に同じインストールコマンドを実行してください。Rust版の実行にPythonは必要ありません。デモ用データも実行ファイルに組み込まれています。
 
-*実装した端末出力をレンダリングした表示例です。Windows実機のスクリーンショットではありません。*
+以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.1` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
 
-大きな文字ロゴと独自のドットアートを表示します。横幅が92桁以上の端末ではアートと操作一覧を2カラムで並べ、狭い端末ではコンパクトな縦配置に切り替わります。色・Unicodeが使えない端末にはプレーンな表示で対応します。
+## 操作
 
-ロゴと `Welcome to Open Pixiv Downloader` が表示されます。URLをそのまま貼り付けるか、`/help` で操作を選びます。URLの入力は空行で確定し、保存先と並行数を選択してEnterで開始します。
+URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動します。**Ctrl+S → Enter** で確認して保存開始。初めて試すときは **F2 → Ctrl+S → Enter** で、架空の4作品を通信せず保存できます。
 
-```text
-opixiv > /demo
-保存先 [demo-archive] >
-同時に保存する作品数（1〜4） [2] >
-Enterで開始 / bでメニューへ / qで終了 >
-```
-
-| 操作 | 内容 |
+| キー | 操作 |
 |---|---|
-| URLを直接貼る・`/download` | 作品・作者・シリーズURLをまとめて保存 |
-| `/demo` | 同梱の4作品で通信なしの体験 |
-| `/verify` | 保存済み作品の整合性を検査 |
-| `/pack` | 完成済み作品をZIPに出力 |
-| `/help`・`/quit` | ヘルプ・終了 |
+| Tab / Shift+Tab | URL・保存先・並行数を移動 |
+| Enter | URL欄で改行、確認画面で保存開始 |
+| F2 | デモ／匿名オンラインを切り替え。入力と保存先はモード別に保持 |
+| F3 | 結果・欠損・停止理由の詳細。↑↓でスクロール |
+| F5 | 対象一覧を確認。媒体はダウンロードしない |
+| Ctrl+S | 保存内容の確認を開く |
+| Alt+V | 選択した保存先の整合性を検査 |
+| Alt+E | 完成済み作品を「保存先名-export.zip」へ出力 |
+| ← / →、1〜4 | 並行数欄で同時保存数を設定 |
+| PgUp / PgDn | 作品一覧をスクロール |
+| F1 | ヘルプ |
+| Esc / Ctrl+C | 実行中は停止を要求し、処理終了を待つ。待機中は終了 |
 
-保存・検査中は進捗と日本語の結果を表示します。同じセッションでは設定した保存先・並行数を再利用できます。デモの保存先は実作品用の既定値と分離しています。狭い端末・色を表示できない端末にも対応し、`NO_COLOR` 設定時は色を使いません。
+16個のURLを貼った場合、既定では2作品を同時に保存し、終わった枠に次の作品を入れます。並行数は1〜4。作者URLは列挙できたイラスト・漫画・うごイラ・小説に展開し、単体URLとの重複を除きます。TUIは作品数の選択上限なしですが、共有の要求予算500件は維持します。
 
-インストールする場合は `python -m pip install -e .` の後、`opixiv` だけでも同じ画面を起動できます。引数なしで標準入力がパイプの場合は対話待ちせず終了します。自動処理には以下のコマンド形式を使ってください。
+ロゴは `█` の面と `╔═╝` などの影を描き分けます。横幅・高さに応じてロゴと2カラムを縮小し、`NO_COLOR` で色を無効にできます。大きなロゴは、たとえば120桁×36行のWindows Terminalで表示できます。画面が狭い場合は短いロゴ・縦配置になります。
 
-## コマンドでオフライン実行する
+## 保存コア
 
-Python 3.11以上で、リポジトリのルートから実行します。実行時の追加パッケージは不要です。Windowsでは環境に応じて `python` を `py -3` に置き換えてください。
+- イラスト・漫画：元画像とページ順を保存し、ページ数を照合。
+- うごイラ：元ZIPとフレーム順・表示時間を保存。全メンバーを読み、CRCエラーを検出。変換はしない。
+- 小説：原文・読みやすいテキスト・オフラインHTMLを保存。章、改ページ、ルビ、太字・斜体、リンク、表紙、許可された挿入関係の画像を扱う。未知の記法は消さずに表示。
+- 保存状態：SQLite、SHA-256付きmanifest、原子的なファイル確定、排他的な実行ロック。再開時は整合性を確認し、完了済み作品をスキップ、破損した素材を再取得。
+- 不足・失敗・停止を完了と区別。ZIP出力は整合性検査後の完成済み作品だけを対象にする。
 
-```sh
-python run.py plan user:9001 --fixture examples/synthetic-fixture.json --out demo-archive
-python run.py fetch user:9001 --fixture examples/synthetic-fixture.json --out demo-archive
-python run.py verify demo-archive
-python run.py pack demo-archive demo-export.zip
+既存Python版のアーカイブと同じ保存形式を使用します。合成4形式について、両方向の検査・再開・ZIP出力と原本バイト列の一致を確認しています。生成するHTMLの装飾やJSONの空白は同一ではありません。更新検出と旧版保持は、再開とは別に今後追加します。
+
+## コマンドで使う
+
+引数付きコマンドはJSONを返します。標準入力・出力がパイプの場合、引数なしのTUIは開始しません。
+
+```powershell
+opixiv plan user:9001 --demo --all --out demo-archive
+opixiv fetch user:9001 art:1001 --demo --all --jobs 2 --out demo-archive
+opixiv verify demo-archive
+opixiv pack demo-archive demo-export.zip
+
+# UTF-8の一覧ファイル。空行、#コメント、BOMに対応
+opixiv plan --input urls.txt --online --all --out archive
+opixiv fetch --input urls.txt --online --all --jobs 2 --out archive
 ```
 
-同梱の架空の4作品を使用し、実サイトへは接続しません。小説の出力は `demo-archive/works/novel_1004/index.html` です。再度 `fetch` すると、整合性を確認できた保存済み作品をスキップします。
+`--demo`、`--fixture examples/synthetic-fixture.json`、`--online` のいずれかを指定します。`--types art|novel|all`、`--limit`、`--retry-unavailable`、`--request-budget`、`--max-file-mib` も利用できます。
+
+オンラインのリクエスト開始間隔は全ワーカーで共有し、既定2秒。401・403・429、リダイレクト、HTML応答では全体を停止します。自動リトライはせず、再実行で再開します。`--all` は作品数の選択上限を外す指定で、要求予算や閲覧条件を変更しません。現状は匿名取得のみ、公開・全年齢と確認できる作品だけを対象とします。
+
+## 開発と検証
 
 ```sh
-python run_tests.py
-node --test tools/windows-probe/collector.test.mjs
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo build --locked
+python tools/check_rust_compat.py target/debug/opixiv
 ```
 
-Node.jsは診断拡張の開発用テストにだけ必要です。Pythonコア・対話モードのテストは49件、診断処理のテストは8件です。Linuxでの実行結果であり、Windows対応の証明ではありません。
+Windowsの互換性確認では最後のパスを `target/debug/opixiv.exe` にしてください。Pythonは旧版との比較検証にのみ必要で、Rust版の実行時には呼び出しません。
 
-## URLをまとめて指定する
+Rustテスト25件、旧Pythonテスト49件、両方向のアーカイブ互換性検査をLinuxで実施しています。実ターミナルでもデモ保存・検査・ZIP出力・終了を確認済みです。GitHub ActionsにWindows／Linuxのビルド・テストと実行ファイルのartifact出力を追加しています。CIの成功とWindows実機での表示確認は区別します。
 
-引数に複数の作品・作者・シリーズURLを指定するか、UTF-8のテキストファイルに1行1URLで記載します。両方を併用でき、重複する作品は1回だけ処理します。空行と `#` で始まるコメント行は無視します。
-
-```sh
-# 同梱データで作者・単体作品を混ぜ、2作品を並列保存する
-python run.py fetch user:9001 art:1001 --fixture examples/synthetic-fixture.json --all --jobs 2 --out demo-archive
-
-# 実サイト用の書式例：urls.txtに作品・作者のURLを記載する
-python run.py plan --input urls.txt --online --all --out archive
-python run.py fetch --input urls.txt --online --all --jobs 2 --out archive
-```
-
-作者URLは `https://www.pixiv.net/users/作者ID` の形式です。列挙できたイラスト・漫画・うごイラ・小説を対象にします。`--types novel` または `--types art` で絞り込めます。
-
-`--jobs` は1〜4（既定1）。媒体の転送を重ねても、リクエスト開始間隔と要求予算は全ワーカーで共有します。401・403・429等で停止を共有し、後続を投入しません。`--all` は作品数の選択上限を外しますが、要求予算は維持し、残りは未完了として記録します。同じコマンドを再実行すると検査済みの作品をスキップして続きを進めます。
-
-実サイトの経路は匿名取得のみで、通常セッションとの連携は未完成です。`--all` は、閲覧条件で見えない作品や削除済み作品まで取得できる意味ではありません。
-
-[CLI・GUI・Rustの開発方針](docs/PRODUCT_DIRECTION_JA.md)も参照してください。
-
-## Windowsでのメタデータ診断
-
-[診断拡張ZIP](tools/open-pixiv-metadata-probe-windows.zip)を展開し、[同梱手順](tools/windows-probe/README_JA.md)に沿ってEdge／Chromeへ読み込みます。Cookieやパスワード、小説本文をレポートへ出力しません。画像・ZIP本体は取得しません。
-
-対象は診断用に指定されたイラスト149564947、漫画130117333、小説29476682、うごイラ151427872です。403・429などでは全体を停止し、停止したレポートも保存できます。実作品データや診断レポートをGitへコミットしないでください。
-
-## 既知の不足
-
-| 項目 | 現状 |
+| 場所 | 内容 |
 |---|---|
-| ページ不足、素材欠損、保存後の画像破損 | 合成データで検出・修復を確認 |
-| うごイラZIP内部の破損 | CRC不一致を完了として扱うケースあり。改修対象 |
-| 更新検出・旧版保持 | 未実装。通常の再開とは別に追加予定 |
-| 本人の通常セッションとの連携 | Pythonコアは匿名のみ。実証・分離設計が必要 |
-| 実サイト互換性 | クラウドからの作品APIはHTTP 403。未検証 |
-| Windows実機・診断拡張のインストール | 未検証 |
+| `rust/`、`Cargo.toml`、`Cargo.lock` | 現行のRust製CLI・Ratatui・保存コア |
+| `src/pixiv_archive/`、`run.py`、`tests/` | 比較検証用の旧Python版。`python run.py` で従来画面を起動 |
+| `examples/` | 自作の合成fixture。実作品・認証情報なし |
+| [Windows診断拡張](tools/windows-probe/README_JA.md) | 通常閲覧セッションでメタデータを確認する補助ツール |
+| [移行記録](docs/RUST_MIGRATION_JA.md)・[検証状況](docs/STATUS_JA.md) | 移行の範囲と既知の不足 |
+| [計画](docs/PLAN_JA.md)・[OSS比較](docs/COMPARISON_JA.md) | 目標と採用判断 |
 
-## 利用条件とライセンス
+旧Python版のテストは `python run_tests.py`、診断拡張のテストは `node --test tools/windows-probe/collector.test.mjs` です。診断拡張は画像本体や小説本文を収集するものではありません。
+
+## 既知の不足と利用条件
+
+本人セッションとの連携、4形式の実サイト互換性、Windows実機、全小説記法・媒体デコーダーによる照合は未検証です。クラウドからの作品APIはHTTP 403で、取得可能と判定していません。更新検出・旧版保持・GUIは未実装です。従来Python版にはうごイラZIPのCRC不一致を見逃すケースが残っています。
 
 [公式ガイドライン](https://policies.pixiv.net/)の「アプリケーション、各種サービス等への使用について」には、クローラー等を用いた作品収集の禁止が明記されています。作者の許諾とサービス側の利用条件は別に確認し、自動取得方式の適合を確認済みとは扱っていません。
 
-コードは[MIT](LICENSE)。取り込んだα版と追加した診断ツールの来歴は[NOTICE](NOTICE.md)を参照してください。コードのライセンスは、Pixiv上の作品の利用許可やサービスへのアクセス許可を付与するものではありません。
+コードは[MIT](LICENSE)。来歴は[NOTICE](NOTICE.md)を参照してください。コードのライセンスは、作品の利用許可やサービスへのアクセス許可を付与しません。

@@ -1,0 +1,43 @@
+name: Rust and archive compatibility
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - name: Check archive compatibility (Linux)
+        if: runner.os == 'Linux'
+        run: python tools/check_rust_compat.py target/release/opixiv
+      - name: Check archive compatibility (Windows)
+        if: runner.os == 'Windows'
+        run: python tools/check_rust_compat.py target/release/opixiv.exe
+      - run: python run_tests.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opixiv-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            target/release/opixiv
+            target/release/opixiv.exe
+            LICENSE
+            NOTICE.md
+            README.md
+          if-no-files-found: error
