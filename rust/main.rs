@@ -3,6 +3,7 @@ mod collection;
 mod error;
 mod folder;
 mod jobs;
+mod media;
 mod novel;
 mod target;
 mod transport;
@@ -72,10 +73,17 @@ struct FetchArgs {
     /// Use the embedded synthetic fixture (no Python or network needed)
     #[arg(long,conflicts_with_all=["online","fixture"])]
     demo: bool,
-    #[arg(long, default_value_t = 2.0)]
-    interval: f64,
-    #[arg(long, default_value_t = 500)]
-    request_budget: usize,
+    /// Global request start interval; defaults to 2 seconds, or 1 with --balanced
+    #[arg(long)]
+    interval: Option<f64>,
+    /// Separate API/media timing (API >=2 seconds, global/media >=1 second)
+    #[arg(long)]
+    balanced: bool,
+    /// Resume the saved job targets instead of discovering the author again
+    #[arg(long)]
+    resume: bool,
+    #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    request_budget: u32,
     #[arg(long, default_value_t = 256)]
     max_file_mib: u64,
     #[arg(long)]
@@ -94,8 +102,10 @@ impl From<FetchArgs> for Options {
             online: a.online,
             fixture: a.fixture,
             demo: a.demo,
-            interval: a.interval,
-            request_budget: a.request_budget,
+            interval: a.interval.unwrap_or(if a.balanced { 1.0 } else { 2.0 }),
+            balanced: a.balanced,
+            resume: a.resume,
+            request_budget: a.request_budget as usize,
             max_file_mib: a.max_file_mib,
             retry_unavailable: a.retry_unavailable,
         }
@@ -159,4 +169,60 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    fn options(args: &[&str]) -> Options {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let Some(Command::Fetch(args)) = cli.command else {
+            panic!("expected fetch");
+        };
+        args.into()
+    }
+    #[test]
+    fn profile_defaults_and_explicit_interval_are_distinct() {
+        let legacy = options(&["opixiv", "fetch", "art:1", "--online"]);
+        assert_eq!(legacy.interval, 2.0);
+        assert_eq!(legacy.request_budget, 500);
+        assert!(!legacy.balanced);
+        let balanced = options(&["opixiv", "fetch", "art:1", "--online", "--balanced"]);
+        assert_eq!(balanced.interval, 1.0);
+        assert!(balanced.balanced);
+        let explicit = options(&[
+            "opixiv",
+            "fetch",
+            "art:1",
+            "--online",
+            "--balanced",
+            "--interval",
+            "3",
+        ]);
+        assert_eq!(explicit.interval, 3.0);
+    }
+    #[test]
+    fn resume_accepts_no_targets_and_budget_is_finite() {
+        let resumed = options(&[
+            "opixiv",
+            "fetch",
+            "--resume",
+            "--online",
+            "--request-budget",
+            "20000",
+        ]);
+        assert!(resumed.resume);
+        assert!(resumed.targets.is_empty());
+        assert_eq!(resumed.request_budget, 20_000);
+        for value in ["0", "100001"] {
+            assert!(Cli::try_parse_from([
+                "opixiv",
+                "fetch",
+                "--online",
+                "--request-budget",
+                value
+            ])
+            .is_err());
+        }
+    }
 }

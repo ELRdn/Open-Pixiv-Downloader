@@ -19,6 +19,8 @@ pub struct Report {
     pub copied: usize,
     pub existing: usize,
     pub cancelled: bool,
+    /// Actual filesystem failures stop new HTTP; edited-copy conflicts do not.
+    pub fatal_io: bool,
     pub files: Vec<Value>,
     pub problems: Vec<Value>,
 }
@@ -28,6 +30,7 @@ impl Report {
         self.copied += other.copied;
         self.existing += other.existing;
         self.cancelled |= other.cancelled;
+        self.fatal_io |= other.fatal_io;
         self.files.extend(other.files);
         self.problems.extend(other.problems);
     }
@@ -208,7 +211,7 @@ pub fn work(
                     }
                     report.files.push(json!({"key":key,"source":source,"output":output,"status":if copied{"copied"}else{"existing"}}));
                 }
-                Err(e @ Error::Stop(_)) => return Err(e),
+                Err(e @ Error::Stop(_)) | Err(e @ Error::Io(_)) => return Err(e),
                 Err(e) => report.problem(&key, &output, e),
             }
         }
@@ -219,6 +222,10 @@ pub fn work(
     })();
     match result {
         Err(Error::Stop(_)) => report.cancelled = true,
+        Err(e @ Error::Io(_)) => {
+            report.fatal_io = true;
+            report.problem(&key, "", e);
+        }
         Err(e) => report.problem(&key, "", e),
         Ok(()) => {}
     }

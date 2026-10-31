@@ -1,21 +1,19 @@
 use crate::{
-    archive::{atomic, discover, now, safe_path, Archive, SharedArchive},
+    archive::{atomic, discover, fingerprint, now, safe_path, Archive, SharedArchive},
     collection,
-    error::{invalid, Error, Result},
+    error::{invalid, Error, Result, StopReason},
+    media::SharedMedia,
     target::Target,
     transport::{Fixture, Online, Transport, DEMO},
 };
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, VecDeque},
     fs,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
-    },
+    sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug)]
@@ -34,6 +32,8 @@ pub struct Options {
     pub request_budget: usize,
     pub max_file_mib: u64,
     pub retry_unavailable: bool,
+    pub balanced: bool,
+    pub resume: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -52,12 +52,22 @@ impl Default for Options {
             request_budget: 500,
             max_file_mib: 256,
             retry_unavailable: false,
+            balanced: false,
+            resume: false,
         }
     }
 }
 #[derive(Clone, Debug)]
 pub enum Event {
     Message(String),
+    BodyReady {
+        key: String,
+    },
+    Phase {
+        key: String,
+        status: String,
+    },
+    Metrics(Value),
     Selected {
         total: usize,
         already: usize,
@@ -108,6 +118,69 @@ pub fn targets(options: &Options) -> Result<Vec<Target>> {
         .map(|v| v.into_iter().filter(|t| seen.insert(t.clone())).collect())
 }
 
+/// A target snapshot is separate from per-work checkpoints: a crash cannot erase
+/// the remaining IDs, and a resume never silently refreshes an author's list.
+fn snapshot(options: &Options, refs: &[Target], source: &[String]) -> Value {
+    json!({"schema_version":1,"discovery_complete":true,"created_at":now(),"mode":if options.online {"online"}else{"fixture"},"source_targets":source,"targets":refs.iter().map(Target::label).collect::<Vec<_>>(),"types":options.types,"jobs":options.jobs,"request_budget":options.request_budget,"balanced":options.balanced,"interval":options.interval})
+}
+fn resume_targets(options: &Options) -> Result<(Vec<Target>, Vec<String>)> {
+    if !options.targets.is_empty() || options.input.is_some() {
+        return Err(invalid(
+            "--resume uses saved targets; do not supply URLs or --input",
+        ));
+    }
+    let root = options.out.canonicalize()?;
+    let job = safe_path(&root, "job.json")?;
+    let plan = safe_path(&root, "plan.json")?;
+    let path = if plan.exists()
+        && (!job.exists() || fs::metadata(&plan)?.modified()? > fs::metadata(&job)?.modified()?)
+    {
+        plan
+    } else {
+        job
+    };
+    if fs::metadata(&path)?.len() > 16 * 1024 * 1024 {
+        return Err(invalid("Saved job exceeds 16 MiB"));
+    }
+    let v: Value = serde_json::from_slice(&fs::read(path)?)?;
+    if v["schema_version"] != 1 || v["mode"] != if options.online { "online" } else { "fixture" } {
+        return Err(invalid("Saved job format or online/fixture mode differs"));
+    }
+    if v["discovery_complete"] != true {
+        return Err(invalid("Saved selection is incomplete; run the source URLs again instead of resuming an older job"));
+    }
+    let items = v["targets"]
+        .as_array()
+        .ok_or_else(|| invalid("Invalid saved targets"))?;
+    if items.len() > 100_000 {
+        return Err(invalid("Saved job exceeds 100000 works"));
+    }
+    let refs = items
+        .iter()
+        .map(|v| Target::parse(v.as_str().ok_or_else(|| invalid("Invalid saved target"))?))
+        .collect::<Result<Vec<_>>>()?;
+    if refs
+        .iter()
+        .any(|t| !matches!(t.kind.as_str(), "art" | "novel"))
+    {
+        return Err(invalid("Saved job must contain concrete work IDs"));
+    }
+    let mut seen = HashSet::new();
+    if refs.iter().any(|t| !seen.insert(t.clone())) {
+        return Err(invalid("Duplicate saved target"));
+    }
+    let sources = v["source_targets"]
+        .as_array()
+        .map(|v| {
+            v.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((refs, sources))
+}
+
 pub fn run(
     options: Options,
     plan: bool,
@@ -118,10 +191,11 @@ pub fn run(
     if !(1..=4).contains(&options.jobs)
         || !(1..=1000).contains(&options.limit)
         || !(1..=1024).contains(&options.max_file_mib)
-        || !(1..=5000).contains(&options.request_budget)
+        || !(1..=100_000).contains(&options.request_budget)
+        || !["all", "art", "novel"].contains(&options.types.as_str())
     {
         return Err(invalid(
-            "Use jobs 1–4, limit 1–1000, request budget 1–5000, file size 1–1024 MiB",
+            "Use jobs 1–4, limit 1–1000, request budget 1–100000, file size 1–1024 MiB",
         ));
     }
     if usize::from(options.online)
@@ -133,13 +207,24 @@ pub fn run(
             "Choose exactly one of --online, --demo or --fixture",
         ));
     }
-    let targets = targets(&options)?;
-    let client: Arc<dyn Transport> = if options.online {
-        Arc::new(Online::new(
+    // Validate all external input before creating any archive files.
+    let resumed = if options.resume {
+        Some(resume_targets(&options)?)
+    } else {
+        None
+    };
+    let input = if options.resume {
+        Vec::new()
+    } else {
+        targets(&options)?
+    };
+    let inner: Arc<dyn Transport> = if options.online {
+        Arc::new(Online::with_profile(
             options.interval,
             options.request_budget,
             options.max_file_mib * 1024 * 1024,
             stop.clone(),
+            options.balanced,
         )?)
     } else {
         let source = if let Some(path) = &options.fixture {
@@ -147,40 +232,72 @@ pub fn run(
         } else {
             DEMO.into()
         };
-        Arc::new(Fixture::new(&source, stop.clone())?)
+        Arc::new(Fixture::with_budget(
+            &source,
+            stop.clone(),
+            options.request_budget,
+        )?)
     };
+    let client: Arc<dyn Transport> =
+        Arc::new(SharedMedia::new(inner, options.max_file_mib * 1024 * 1024)?);
     let archive = Arc::new(Archive::open(&options.out, false)?);
     emit(Event::ArchiveOpened(archive.root.clone()));
-    let mut report = json!({"tool_version":env!("CARGO_PKG_VERSION"),"started_at":now(),"mode":if options.online {"anonymous_online_unvalidated"} else {"synthetic_offline"},"targets":targets.iter().map(Target::label).collect::<Vec<_>>(),"target":if targets.len()==1 {targets[0].label()} else {"batch".into()},"jobs":options.jobs,"limit":if options.all {Value::Null} else {json!(options.limit)},"status":"running","results":[]});
+    let sources: Vec<String> = resumed
+        .as_ref()
+        .map(|(_, s)| s.clone())
+        .unwrap_or_else(|| input.iter().map(Target::label).collect());
+    let mut report = json!({"tool_version":env!("CARGO_PKG_VERSION"),"started_at":now(),"mode":if options.online{"anonymous_online_unvalidated"}else{"synthetic_offline"},"targets":sources,"target":if sources.len()==1 {sources[0].clone()}else{"batch".into()},"jobs":options.jobs,"limit":if options.all{Value::Null}else{json!(options.limit)},"resumed":options.resume,"request_budget":options.request_budget,"balanced":options.balanced,"status":"running","results":[],"body_ready_count":0,"full_complete_count":0,"stop_reason":Value::Null});
     let mut collected = collection::Report::default();
-    emit(Event::Message("対象作品を確認しています…".into()));
+    emit(Event::Message(
+        if options.resume {
+            "保存した対象一覧から再開します。作者一覧は再取得しません。"
+        } else {
+            "対象作品を確認しています…"
+        }
+        .into(),
+    ));
     let action = (|| -> Result<()> {
+        // Supersede old work immediately. A failed new discovery must never
+        // silently resume an unrelated old job or plan.
+        let selection_path = safe_path(&archive.root, if plan { "plan.json" } else { "job.json" })?;
+        if !options.resume {
+            let mut incomplete = snapshot(&options, &[], &sources);
+            incomplete["discovery_complete"] = json!(false);
+            atomic(&selection_path, &serde_json::to_vec_pretty(&incomplete)?)?;
+        }
         let mut refs = Vec::new();
         let mut seen = HashSet::new();
-        for target in targets {
-            for r in discover(client.as_ref(), &target, &options.types)? {
-                if seen.insert(r.clone()) {
-                    refs.push(r);
+        if let Some((saved, _)) = resumed {
+            refs = saved;
+        } else {
+            for target in &input {
+                for r in discover(client.as_ref(), target, &options.types)? {
+                    if seen.insert(r.clone()) {
+                        refs.push(r);
+                    }
                 }
             }
         }
+        if refs.len() > 100_000 {
+            return Err(invalid(
+                "Discovered more than 100000 works; narrow selection",
+            ));
+        }
         report["discovered"] = json!(refs.len());
         let mut remaining = Vec::new();
-        let mut already = 0;
+        let mut existing = Vec::new();
         let mut excluded = 0;
+        let mut excluded_targets = Vec::new();
         for r in refs {
+            if client.stopped() {
+                return Err(Error::Stop("Stopped while checking saved works".into()));
+            }
             if archive.complete(&r)? {
-                already += 1;
                 emit(Event::Existing {
                     key: r.key(),
                     status: "already_complete".into(),
                 });
-                if !plan {
-                    collected.merge(archive.collect_work(&r, &|| client.stopped()));
-                    if collected.cancelled {
-                        return Err(Error::Stop("集約を中断しました。".into()));
-                    }
-                }
+                existing.push(r);
             } else if !options.retry_unavailable
                 && matches!(
                     archive.status(&r)?.as_deref(),
@@ -188,11 +305,13 @@ pub fn run(
                 )
             {
                 excluded += 1;
+                excluded_targets.push(r);
             } else {
                 remaining.push((archive.status(&r)?.is_some(), r));
             }
         }
-        remaining.sort_by_key(|(attempted, _)| *attempted);
+        // Restore incomplete snapshots before adding new work, without refreshing them.
+        remaining.sort_by_key(|(attempted, _)| !*attempted);
         let deferred = if options.all {
             0
         } else {
@@ -207,27 +326,51 @@ pub fn run(
             })
             .map(|(_, r)| r)
             .collect();
-        report["already_complete"] = json!(already);
+        let mut intended = existing.clone();
+        intended.extend(selected.iter().cloned());
+        intended.extend(excluded_targets);
+        let record = snapshot(&options, &intended, &sources);
+        atomic(&selection_path, &serde_json::to_vec_pretty(&record)?)?;
+        report["already_complete"] = json!(existing.len());
         report["previous_exclusions"] = json!(excluded);
         report["selected"] = json!(selected.len());
         report["deferred_by_limit"] = json!(deferred);
+        report["full_complete_count"] = json!(existing.len());
+        report["body_ready_count"] = json!(existing.iter().filter(|t| t.kind == "novel").count());
+        // Bounds are deliberately labeled estimates: covers and inserted assets are unknown.
+        report["estimated_minimum_requests_remaining"] = json!(selected
+            .iter()
+            .filter(|t| archive.manifest(t).is_none())
+            .count());
+        report["estimated_typical_requests_remaining"] = json!(selected
+            .iter()
+            .map(|t| if t.kind == "novel" { 2 } else { 3 })
+            .sum::<usize>());
         emit(Event::Selected {
             total: selected.len(),
-            already,
+            already: existing.len(),
             deferred,
             excluded,
         });
+        emit(Event::Message(format!(
+            "対象 {} / 要求予算 {} / 本文・表紙の概算 {} 要求（挿絵・多ページは追加）",
+            selected.len(),
+            options.request_budget,
+            report["estimated_typical_requests_remaining"]
+        )));
         if plan {
             report["selected_targets"] =
                 json!(selected.iter().map(Target::label).collect::<Vec<_>>());
             report["status"] = json!("planned");
             return Ok(());
         }
-        schedule(
+        schedule_core(
             &archive,
             &client,
             &selected,
+            &existing,
             options.jobs,
+            options.request_budget,
             &mut report,
             &mut collected,
             &emit,
@@ -245,12 +388,15 @@ pub fn run(
         Ok(())
     })();
     if let Err(e) = action {
-        report["status"] = json!(if matches!(e, Error::Stop(_)) {
-            if stop.load(Ordering::SeqCst) {
-                "paused"
-            } else {
-                "failed"
-            }
+        let reason = match &e {
+            Error::Budget => StopReason::RequestBudget,
+            Error::Stop(_) => client.stop_reason().unwrap_or(StopReason::UserCancel),
+            Error::Io(_) | Error::Sql(_) => StopReason::DiskError,
+            _ => StopReason::WorkerError,
+        };
+        report["stop_reason"] = json!(reason);
+        report["status"] = json!(if matches!(e, Error::Budget | Error::Stop(_)) {
+            "paused"
         } else {
             "failed"
         });
@@ -282,6 +428,7 @@ pub fn run(
     report["finished_at"] = json!(now());
     report["requests"] = json!(client.requests());
     report["rate_wait_seconds"] = json!(client.rate_wait().as_secs_f64());
+    report["transport_metrics"] = client.metrics();
     report["request_interval_seconds"] = json!(if options.online {
         options.interval
     } else {
@@ -299,6 +446,13 @@ pub fn run(
     Ok(report)
 }
 
+#[derive(Clone, Copy)]
+enum Stage {
+    Prepare,
+    Finish,
+}
+
+#[cfg(test)]
 fn schedule(
     archive: &SharedArchive,
     client: &Arc<dyn Transport>,
@@ -308,110 +462,297 @@ fn schedule(
     collected: &mut collection::Report,
     emit: &(impl Fn(Event) + Sync),
 ) -> Result<()> {
-    let (tx, rx) = mpsc::channel();
+    schedule_core(
+        archive,
+        client,
+        selected,
+        &[],
+        jobs,
+        100_000,
+        report,
+        collected,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_core(
+    archive: &SharedArchive,
+    client: &Arc<dyn Transport>,
+    selected: &[Target],
+    existing: &[Target],
+    jobs: usize,
+    budget: usize,
+    report: &mut Value,
+    collected: &mut collection::Report,
+    emit: &(impl Fn(Event) + Sync),
+) -> Result<()> {
+    let (tasks, work) = mpsc::sync_channel::<(Target, Stage)>(jobs * 2);
+    let work = Arc::new(Mutex::new(work));
+    let (done_tx, done_rx) = mpsc::channel();
+    let (copies, copy_rx) = mpsc::sync_channel::<(Target, Option<Value>)>(8);
+    let (copy_done, copy_results) = mpsc::channel();
+    let mut pending = VecDeque::new();
     let mut next = 0;
     let mut active = 0;
-    let mut handles = Vec::new();
-    let mut failure = None;
-    loop {
-        while failure.is_none() && !client.stopped() && next < selected.len() && active < jobs {
-            let target = selected[next].clone();
-            next += 1;
-            active += 1;
-            emit(Event::Started(target.key()));
+    let mut failure: Option<Error> = None;
+    let mut body_keys = HashSet::new();
+    let mut full = existing.len();
+    let mut last_metrics = Instant::now();
+    let mut prepare_seconds = 0.0;
+    let mut assets_seconds = 0.0;
+    let mut collection_seconds = 0.0;
+    // A bounded, independent collection stage avoids occupying network work slots.
+    // Only one copy for each novel is scheduled, after its body checkpoint.
+    thread::scope(|scope| -> Result<()> {
+        let a = archive.clone();
+        let c = client.clone();
+        let copier = scope.spawn(move || {
+            for (target, manifest) in copy_rx {
+                let started = Instant::now();
+                let r = collection::work(&a.root, &target, manifest, &|| c.stopped());
+                if r.fatal_io {
+                    c.cancel();
+                }
+                let _ = copy_done.send((r, started.elapsed().as_secs_f64()));
+            }
+        });
+        let mut workers = Vec::new();
+        for _ in 0..jobs {
+            let work = work.clone();
             let a = archive.clone();
             let c = client.clone();
-            let tx = tx.clone();
-            handles.push(thread::spawn(move || {
-                let result = a.save(&target, c.as_ref());
-                let collected = if result.as_ref().is_ok_and(|s| {
-                    matches!(s.as_str(), "complete" | "partial" | "already_complete")
-                }) {
-                    Some(a.collect_work(&target, &|| c.stopped()))
+            let tx = done_tx.clone();
+            workers.push(scope.spawn(move || loop {
+                let task = work.lock().unwrap().recv();
+                let Ok((target, stage)) = task else { break };
+                let started = Instant::now();
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match stage {
+                        Stage::Prepare => a.prepare(&target, c.as_ref()),
+                        Stage::Finish => a.finish(&target, c.as_ref()),
+                    }))
+                    .unwrap_or_else(|_| {
+                        c.cancel();
+                        Err(invalid("Worker terminated unexpectedly"))
+                    });
+                if tx
+                    .send((target, stage, result, started.elapsed().as_secs_f64()))
+                    .is_err()
+                {
+                    break;
+                }
+            }));
+        }
+        drop(done_tx);
+        let mut existing_next = 0;
+        let mut prefer_finish = false;
+        loop {
+            while !client.stopped() && active < jobs {
+                let allow_prepare = failure.is_none() && next < selected.len();
+                let task = if !pending.is_empty()
+                    && (!allow_prepare || prefer_finish || pending.len() >= jobs * 2)
+                {
+                    prefer_finish = false;
+                    pending.pop_front().map(|t| (t, Stage::Finish))
+                } else if allow_prepare {
+                    let target = selected[next].clone();
+                    next += 1;
+                    emit(Event::Started(target.key()));
+                    prefer_finish = true;
+                    Some((target, Stage::Prepare))
                 } else {
                     None
                 };
-                let _ = tx.send((target, result, collected));
-            }));
-        }
-        if active == 0 {
-            break;
-        }
-        // A worker panic must close the channel rather than leave the receiver blocked.
-        let (target, result, work_collection) = loop {
-            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(v) => break v,
-                Err(mpsc::RecvTimeoutError::Timeout) if handles.iter().any(|h| h.is_finished()) => {
-                    if handles.iter().filter(|h| h.is_finished()).count() == handles.len() {
-                        if let Ok(v) = rx.try_recv() {
-                            break v;
-                        }
+                let Some(task) = task else { break };
+                emit(Event::Phase {
+                    key: task.0.key(),
+                    status: match task.1 {
+                        Stage::Prepare => "metadata",
+                        Stage::Finish => "assets_pending",
+                    }
+                    .into(),
+                });
+                tasks
+                    .send(task)
+                    .map_err(|_| invalid("Worker queue closed"))?;
+                active += 1;
+            }
+            if let Some(target) = existing.get(existing_next) {
+                match copies.try_send((target.clone(), archive.manifest(target))) {
+                    Ok(()) => existing_next += 1,
+                    Err(mpsc::TrySendError::Full(_)) => {}
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
                         client.cancel();
-                        for h in handles {
-                            let _ = h.join();
+                        return Err(invalid("Collection worker terminated"));
+                    }
+                }
+            }
+            if active == 0 {
+                break;
+            }
+            match done_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok((target, stage, result, elapsed)) => {
+                    match stage {
+                        Stage::Prepare => prepare_seconds += elapsed,
+                        Stage::Finish => assets_seconds += elapsed,
+                    }
+                    active -= 1;
+                    let body_ready = target.kind == "novel"
+                        && archive.manifest(&target).is_some_and(|m| {
+                            ["source.txt", "plain.txt"].iter().all(|name| {
+                                m["files"]
+                                    .as_array()
+                                    .and_then(|f| f.iter().find(|e| e["path"] == *name))
+                                    .is_some_and(|e| {
+                                        safe_path(
+                                            &archive.root,
+                                            &format!("works/{}/{}", target.key(), name),
+                                        )
+                                        .ok()
+                                        .and_then(|p| fingerprint(&p).ok())
+                                        .is_some_and(|(h, b)| e["sha256"] == h && e["bytes"] == b)
+                                    })
+                            })
+                        });
+                    if body_ready && body_keys.insert(target.key()) {
+                        emit(Event::BodyReady { key: target.key() });
+                        copies
+                            .send((target.clone(), archive.manifest(&target)))
+                            .map_err(|_| invalid("Collection worker terminated"))?;
+                    }
+                    if matches!(stage, Stage::Prepare)
+                        && result.as_ref().is_ok_and(|s| s == "assets_pending")
+                    {
+                        pending.push_back(target);
+                    } else {
+                        let status = match result {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let status = if matches!(e, Error::Budget | Error::Stop(_)) {
+                                    "paused"
+                                } else {
+                                    "failed"
+                                };
+                                // Budget exhaustion drains ready/local finishing stages.
+                                if !matches!(e, Error::Budget) {
+                                    client.cancel();
+                                }
+                                if failure.is_none()
+                                    || matches!(failure, Some(Error::Budget))
+                                    || matches!(e, Error::Io(_) | Error::Sql(_))
+                                {
+                                    failure = Some(e);
+                                }
+                                status.into()
+                            }
+                        };
+                        if matches!(status.as_str(), "complete" | "already_complete") {
+                            full += 1;
                         }
-                        return Err(invalid(
-                            "Worker terminated unexpectedly; completed works remain saved",
-                        ));
+                        if target.kind == "art"
+                            && matches!(
+                                status.as_str(),
+                                "complete" | "partial" | "already_complete"
+                            )
+                            && archive.manifest(&target).is_some_and(|m| {
+                                m["files"].as_array().is_some_and(|f| {
+                                    f.iter().any(|e| {
+                                        e["path"].as_str().is_some_and(|p| {
+                                            p.starts_with("images/") || p == "frames.zip"
+                                        })
+                                    })
+                                })
+                            })
+                        {
+                            copies
+                                .send((target.clone(), archive.manifest(&target)))
+                                .map_err(|_| invalid("Collection worker terminated"))?;
+                        }
+                        let reason = archive.reason(&target)?;
+                        let omissions = archive
+                            .manifest(&target)
+                            .map(|m| m["omissions"].clone())
+                            .unwrap_or(json!([]));
+                        report["results"].as_array_mut().unwrap().push(json!({"key":target.key(),"status":status,"reason":reason,"omissions":omissions,"body_ready":body_ready}));
+                        emit(Event::Progress {
+                            key: target.key(),
+                            status,
+                            done: report["results"].as_array().unwrap().len(),
+                            total: selected.len(),
+                        });
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => {
+                    failure = Some(invalid("Worker channel closed"));
                     client.cancel();
-                    return Err(invalid("Worker channel closed"));
+                    break;
                 }
             }
-        };
-        active -= 1;
-        if let Some(work_collection) = work_collection {
-            collected.merge(work_collection);
+            for (r, elapsed) in copy_results.try_iter() {
+                collection_seconds += elapsed;
+                if r.fatal_io {
+                    client.cancel();
+                    failure = Some(Error::Io(std::io::Error::other(
+                        "Collection filesystem operation failed",
+                    )));
+                }
+                collected.merge(r);
+            }
+            if last_metrics.elapsed() >= Duration::from_millis(200) {
+                emit(Event::Metrics(
+                    json!({"requests":client.requests(),"request_budget":budget,"body_ready":body_keys.len()+existing.iter().filter(|t|t.kind=="novel").count(),"complete":full,"transport":client.metrics()}),
+                ));
+                last_metrics = Instant::now();
+            }
         }
-        let status = match result {
-            Ok(s) => s,
-            Err(e) => {
+        drop(tasks);
+        for target in &existing[existing_next..] {
+            copies
+                .send((target.clone(), archive.manifest(target)))
+                .map_err(|_| invalid("Collection worker terminated"))?;
+        }
+        drop(copies);
+        for worker in workers {
+            if worker.join().is_err() {
                 client.cancel();
-                let status = if matches!(e, Error::Stop(_)) {
-                    "paused"
-                } else {
-                    "failed"
-                };
-                if failure.is_none() {
-                    failure = Some(e);
-                }
-                status.into()
+                failure = Some(invalid("Worker terminated unexpectedly"));
             }
-        };
-        let reason = archive.reason(&target)?;
-        let omissions = if status == "partial" {
-            archive
-                .manifest(&target)
-                .map(|m| m["omissions"].clone())
-                .unwrap_or(json!([]))
-        } else {
-            json!([])
-        };
-        report["results"].as_array_mut().unwrap().push(
-            json!({"key":target.key(),"status":status,"reason":reason,"omissions":omissions}),
-        );
-        emit(Event::Progress {
-            key: target.key(),
-            status,
-            done: report["results"].as_array().unwrap().len(),
-            total: selected.len(),
-        });
-    }
-    for h in handles {
-        if h.join().is_err() {
-            return Err(invalid("Worker terminated unexpectedly"));
         }
-    }
-    if let Some(e) = failure {
-        return Err(e);
-    }
-    if client.stopped() {
-        return Err(Error::Stop("Stopped; completed works remain saved".into()));
-    }
-    Ok(())
+        if copier.join().is_err() {
+            failure = Some(invalid("Collection worker terminated unexpectedly"));
+        }
+        for (r, elapsed) in copy_results.try_iter() {
+            collection_seconds += elapsed;
+            if r.fatal_io {
+                client.cancel();
+                failure = Some(Error::Io(std::io::Error::other(
+                    "Collection filesystem operation failed",
+                )));
+            }
+            collected.merge(r);
+        }
+        report["stage_seconds"] = json!({"prepare_sum":prepare_seconds,"assets_sum":assets_seconds,"collection_sum":collection_seconds});
+        report["body_ready_count"] =
+            json!(body_keys.len() + existing.iter().filter(|t| t.kind == "novel").count());
+        report["full_complete_count"] = json!(full);
+        emit(Event::Metrics(
+            json!({"requests":client.requests(),"request_budget":budget,"body_ready":report["body_ready_count"],"complete":full,"transport":client.metrics()}),
+        ));
+        // Prepared-but-not-finished snapshots stay in the durable manifest and are
+        // not counted as finished results. The next resume checks them locally.
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        if client.stopped() {
+            return Err(Error::Stop("Stopped; completed works remain saved".into()));
+        }
+        if next < selected.len() || !pending.is_empty() {
+            return Err(Error::Budget);
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -604,7 +945,7 @@ mod tests {
         let events = events.into_inner().unwrap();
         let first_progress = events
             .iter()
-            .position(|e| matches!(e, Event::Progress { .. }))
+            .position(|e| matches!(e, Event::Phase { status, .. } if status=="assets_pending"))
             .unwrap();
         assert_eq!(
             events[..first_progress]
@@ -618,5 +959,172 @@ mod tests {
         assert_eq!(r["status"], "paused");
         assert_eq!(r["requests"], 0);
     }
-    use std::sync::Mutex;
+
+    #[test]
+    fn saved_selection_resumes_without_rediscovery_or_widening_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let o = Options {
+            demo: true,
+            targets: vec!["user:9001".into()],
+            limit: 1,
+            out: temp.path().join("archive"),
+            ..Default::default()
+        };
+        let first = run(o.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(first["selected"], 1);
+        let resumed = run(
+            Options {
+                targets: vec![],
+                resume: true,
+                all: true,
+                ..o
+            },
+            false,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(resumed["discovered"], 1);
+        assert_eq!(resumed["already_complete"], 1);
+        assert_eq!(resumed["requests"], 0);
+        assert_eq!(resumed["status"], "complete");
+    }
+    #[test]
+    fn failed_new_discovery_never_resumes_unrelated_old_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let o = Options {
+            demo: true,
+            targets: vec!["art:1001".into()],
+            out: temp.path().join("archive"),
+            ..Default::default()
+        };
+        run(o.clone(), false, Arc::default(), |_| {}).unwrap();
+        let failed = run(
+            Options {
+                targets: vec!["user:9999".into()],
+                ..o.clone()
+            },
+            false,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(failed["status"], "failed");
+        let error = run(
+            Options {
+                targets: vec![],
+                resume: true,
+                ..o
+            },
+            false,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("incomplete"));
+    }
+    #[test]
+    fn cancelled_resume_preserves_the_saved_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let o = Options {
+            demo: true,
+            targets: vec!["art:1001".into()],
+            out: temp.path().join("archive"),
+            ..Default::default()
+        };
+        run(o.clone(), false, Arc::default(), |_| {}).unwrap();
+        let before = fs::read(o.out.join("job.json")).unwrap();
+        let r = run(
+            Options {
+                targets: vec![],
+                resume: true,
+                ..o.clone()
+            },
+            false,
+            Arc::new(AtomicBool::new(true)),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(r["stop_reason"]["kind"], "user_cancel");
+        assert_eq!(fs::read(o.out.join("job.json")).unwrap(), before);
+        let r = run(
+            Options {
+                targets: vec![],
+                resume: true,
+                ..o
+            },
+            false,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(r["requests"], 0);
+    }
+    #[test]
+    fn latest_reviewed_plan_is_used_instead_of_older_job() {
+        let temp = tempfile::tempdir().unwrap();
+        let o = Options {
+            demo: true,
+            targets: vec!["art:1001".into()],
+            out: temp.path().join("archive"),
+            ..Default::default()
+        };
+        run(o.clone(), false, Arc::default(), |_| {}).unwrap();
+        run(
+            Options {
+                targets: vec!["novel:1004".into()],
+                ..o.clone()
+            },
+            true,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(o.out.join("plan.json"))
+            .unwrap();
+        file.set_times(
+            fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(2)),
+        )
+        .unwrap();
+        let r = run(
+            Options {
+                targets: vec![],
+                resume: true,
+                ..o
+            },
+            false,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(r["discovered"], 1);
+        assert_eq!(r["results"][0]["key"], "novel_1004");
+        assert_eq!(r["counts"]["complete"], 1);
+    }
+
+    #[test]
+    fn collection_io_stops_with_disk_reason_while_original_remains_valid() {
+        let temp = tempfile::tempdir().unwrap();
+        let o = Options {
+            demo: true,
+            targets: vec!["art:1001".into()],
+            out: temp.path().join("archive"),
+            ..Default::default()
+        };
+        run(o.clone(), false, Arc::default(), |_| {}).unwrap();
+        fs::remove_dir_all(o.out.join("works/image")).unwrap();
+        fs::write(o.out.join("works/image"), b"blocking directory creation").unwrap();
+        let r = run(o.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(r["status"], "failed");
+        assert_eq!(r["stop_reason"]["kind"], "disk_error");
+        assert_eq!(r["requests"], 0);
+        assert_eq!(
+            Archive::open(&o.out, true).unwrap().verify().unwrap()["valid"],
+            1
+        );
+    }
+    use std::sync::{atomic::Ordering, Mutex};
 }

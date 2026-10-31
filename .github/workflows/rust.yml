@@ -30,6 +30,12 @@ jobs:
       - name: Check archive compatibility (Windows)
         if: runner.os == 'Windows'
         run: python tools/check_rust_compat.py target/release/opixiv.exe
+      - name: Check bulk save and resume (Linux, synthetic 4000 works)
+        if: runner.os == 'Linux'
+        run: python tools/check_bulk.py target/release/opixiv --count 4000
+      - name: Check bulk save and resume (Windows, synthetic 40 works)
+        if: runner.os == 'Windows'
+        run: python tools/check_bulk.py target/release/opixiv.exe --count 40
       - run: python run_tests.py
       - uses: actions/upload-artifact@v4
         with:
