@@ -36,6 +36,9 @@ jobs:
       - name: Check bulk save and resume (Windows, synthetic 40 works)
         if: runner.os == 'Windows'
         run: python tools/check_bulk.py target/release/opixiv.exe --count 40
+      - name: Check hard-kill recovery (Linux, synthetic)
+        if: runner.os == 'Linux'
+        run: python tools/check_crash_resume.py target/release/opixiv
       - run: python run_tests.py
       - uses: actions/upload-artifact@v4
         with:

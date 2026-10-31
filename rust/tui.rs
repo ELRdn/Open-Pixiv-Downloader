@@ -438,6 +438,9 @@ impl App {
         match self.settings_budget.value.parse::<usize>() {
             Ok(value) if (1..=100_000).contains(&value) => {
                 self.request_budget = value;
+                if self.worker.is_none() && self.last.is_none() {
+                    self.active_request_budget = value;
+                }
                 self.balanced = self.settings_balanced;
                 self.modal = Modal::None;
                 self.log(format!(
@@ -2165,6 +2168,7 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.modal == Modal::None);
         assert_eq!(app.request_budget, 5000);
+        assert_eq!(app.active_request_budget, 5000);
         assert!(app.balanced);
         app.urls = Editor::new("art:1");
         let options = app.options().unwrap();
