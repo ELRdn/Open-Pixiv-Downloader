@@ -14,6 +14,7 @@ use std::{
         mpsc, Arc,
     },
     thread,
+    time::Instant,
 };
 
 #[derive(Clone, Debug)]
@@ -71,6 +72,11 @@ pub enum Event {
     },
     Finished(Value),
     Failed(String),
+    ArchiveOpened(PathBuf),
+    Existing {
+        key: String,
+        status: String,
+    },
 }
 pub fn targets(options: &Options) -> Result<Vec<Target>> {
     let mut values = options.targets.clone();
@@ -107,6 +113,7 @@ pub fn run(
     stop: Arc<AtomicBool>,
     emit: impl Fn(Event) + Sync,
 ) -> Result<Value> {
+    let started = Instant::now();
     if !(1..=4).contains(&options.jobs)
         || !(1..=1000).contains(&options.limit)
         || !(1..=1024).contains(&options.max_file_mib)
@@ -142,6 +149,7 @@ pub fn run(
         Arc::new(Fixture::new(&source, stop.clone())?)
     };
     let archive = Arc::new(Archive::open(&options.out, false)?);
+    emit(Event::ArchiveOpened(archive.root.clone()));
     let mut report = json!({"tool_version":env!("CARGO_PKG_VERSION"),"started_at":now(),"mode":if options.online {"anonymous_online_unvalidated"} else {"synthetic_offline"},"targets":targets.iter().map(Target::label).collect::<Vec<_>>(),"target":if targets.len()==1 {targets[0].label()} else {"batch".into()},"jobs":options.jobs,"limit":if options.all {Value::Null} else {json!(options.limit)},"status":"running","results":[]});
     emit(Event::Message("対象作品を確認しています…".into()));
     let action = (|| -> Result<()> {
@@ -161,6 +169,10 @@ pub fn run(
         for r in refs {
             if archive.complete(&r)? {
                 already += 1;
+                emit(Event::Existing {
+                    key: r.key(),
+                    status: "already_complete".into(),
+                });
             } else if !options.retry_unavailable
                 && matches!(
                     archive.status(&r)?.as_deref(),
@@ -250,7 +262,14 @@ pub fn run(
         .saturating_sub(result_count as u64));
     report["finished_at"] = json!(now());
     report["requests"] = json!(client.requests());
+    report["rate_wait_seconds"] = json!(client.rate_wait().as_secs_f64());
+    report["request_interval_seconds"] = json!(if options.online {
+        options.interval
+    } else {
+        0.0
+    });
     report["catalog_entries"] = json!(archive.catalog()?);
+    report["elapsed_seconds"] = json!(started.elapsed().as_secs_f64());
     let data = serde_json::to_vec_pretty(&report)?;
     atomic(&safe_path(&archive.root, "last-run.json")?, &data)?;
     let name = format!(

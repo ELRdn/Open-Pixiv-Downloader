@@ -1,5 +1,6 @@
 mod archive;
 mod error;
+mod folder;
 mod jobs;
 mod novel;
 mod target;

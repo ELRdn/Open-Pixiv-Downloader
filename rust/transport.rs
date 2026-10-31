@@ -20,6 +20,9 @@ pub trait Transport: Send + Sync {
     fn requests(&self) -> usize;
     fn stopped(&self) -> bool;
     fn cancel(&self);
+    fn rate_wait(&self) -> Duration {
+        Duration::ZERO
+    }
 }
 
 pub fn validate_url(value: &str, asset: bool) -> Result<Url> {
@@ -119,6 +122,7 @@ impl Transport for Fixture {
 struct Admission {
     last: Option<Instant>,
     count: usize,
+    waiting: Duration,
 }
 pub struct Online {
     http: Http,
@@ -156,6 +160,7 @@ impl Online {
             gate: Mutex::new(Admission {
                 last: None,
                 count: 0,
+                waiting: Duration::ZERO,
             }),
             stop,
             interval: Duration::from_secs_f64(interval),
@@ -190,11 +195,13 @@ impl Online {
         if let Some(last) = gate.last {
             while last.elapsed() < self.interval {
                 self.check_stop()?;
+                let started = Instant::now();
                 std::thread::sleep(
                     self.interval
                         .saturating_sub(last.elapsed())
                         .min(Duration::from_millis(50)),
                 );
+                gate.waiting += started.elapsed();
             }
         }
         self.check_stop()?;
@@ -277,6 +284,9 @@ impl Online {
     }
 }
 impl Transport for Online {
+    fn rate_wait(&self) -> Duration {
+        self.gate.lock().unwrap().waiting
+    }
     fn api(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
         let response = self.open(
             &format!("https://www.pixiv.net{}", api_key(path, query)?),
@@ -358,6 +368,7 @@ mod tests {
             gate: Mutex::new(Admission {
                 last: None,
                 count: 0,
+                waiting: Duration::ZERO,
             }),
             stop: Arc::default(),
             interval: Duration::from_millis(30),
@@ -369,6 +380,7 @@ mod tests {
     fn shared_request_interval_and_budget_over_real_sockets() {
         let (url, server) = test_server(200, "{}", 2);
         let client = Arc::new(local_client(2));
+        let started = Instant::now();
         let workers: Vec<_> = (0..2)
             .map(|_| {
                 let client = client.clone();
@@ -380,12 +392,23 @@ mod tests {
             worker.join().unwrap();
         }
         let times = server.join().unwrap();
-        assert!(times[1].duration_since(times[0]) >= Duration::from_millis(25));
+        assert_eq!(times.len(), 2);
+        assert!(
+            client
+                .gate
+                .lock()
+                .unwrap()
+                .last
+                .unwrap()
+                .duration_since(started)
+                >= client.interval
+        );
         assert!(matches!(
             client.open_validated(url, false),
             Err(Error::Stop(_))
         ));
         assert_eq!(client.requests(), 2);
+        assert!(client.rate_wait() <= started.elapsed());
     }
     #[test]
     fn rejection_latches_before_another_request() {

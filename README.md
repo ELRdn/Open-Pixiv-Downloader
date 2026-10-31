@@ -2,9 +2,9 @@
 
 **Rust + Ratatui** のローカル保存ツールです。大きな立体文字のロゴから起動し、作品・作者・小説シリーズのURLをまとめて入力できます。Windowsを優先して開発しています。
 
-![Rust + Ratatuiの起動画面](docs/images/ratatui-welcome.png)
+![保存結果と保存先を開くボタン](docs/images/ratatui-output-paths.png)
 
-*実際のLinux端末出力を120桁×36行で取得し、レンダリングした表示例です。Windows実機のスクリーンショットではありません。*
+*合成4作品の保存後。実際のLinux端末出力を120桁×36行で取得し、レンダリングした表示例です。Windows実機のスクリーンショットではありません。*
 
 研究用α版です。実サイトでの4形式の取得、本人セッションとの連携、Windows実機の操作は未検証です。更新検出・旧版保持は未実装です。Pixivの公式製品ではありません。
 
@@ -13,14 +13,16 @@
 [Rustの現行stable版](https://www.rust-lang.org/tools/install)を用意し、PowerShellでリポジトリのフォルダーを開きます。Windowsでソースからビルドする場合は、Rustの案内に従いVisual Studio Build ToolsのC++ビルド環境も導入してください。
 
 ```powershell
-git pull
+cd $HOME
+git clone https://github.com/ELRdn/Open-Pixiv-Downloader.git
+cd Open-Pixiv-Downloader
 cargo install --path . --locked
 opixiv
 ```
 
-インストールせず試す場合は `cargo run --release --locked`。以後の更新は `git pull` の後に同じインストールコマンドを実行してください。Rust版の実行にPythonは必要ありません。デモ用データも実行ファイルに組み込まれています。
+インストールせず試す場合は `cargo run --release --locked`。以後の更新は、リポジトリのフォルダーへ移動して `git pull` の後に同じインストールコマンドを実行してください。Rust版の実行にPythonは必要ありません。デモ用データも実行ファイルに組み込まれています。
 
-以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.1` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
+以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.2` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
 
 ## 操作
 
@@ -28,7 +30,7 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 
 | キー | 操作 |
 |---|---|
-| Tab / Shift+Tab | URL・保存先・並行数を移動 |
+| Tab / Shift+Tab | URL・保存先・並行数・作品一覧を移動 |
 | Enter | URL欄で改行、確認画面で保存開始 |
 | F2 | デモ／匿名オンラインを切り替え。入力と保存先はモード別に保持 |
 | F3 | 結果・欠損・停止理由の詳細。↑↓でスクロール |
@@ -37,9 +39,12 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 | Alt+V | 選択した保存先の整合性を検査 |
 | Alt+E | 完成済み作品を「保存先名-export.zip」へ出力 |
 | ← / →、1〜4 | 並行数欄で同時保存数を設定 |
-| PgUp / PgDn | 作品一覧をスクロール |
+| ↑ / ↓、PgUp / PgDn | 一覧で作品を選択。Enterでそのフォルダーを開く |
+| F6 / F7 | 保存先／選択した作品のフォルダーを開く。画面下のボタンもクリック可能 |
 | F1 | ヘルプ |
 | Esc / Ctrl+C | 実行中は停止を要求し、処理終了を待つ。待機中は終了 |
+
+一覧は `WORK`・`STATUS`・`OUTPUT / PATH` の3列です。実際に作成された作品フォルダーを表示し、長いパスは末尾を残して省略します。F3ではフルパスを確認できます。検査後も行を保持し、再開でスキップした保存済み作品も表示します。Windowsはエクスプローラー、macOSはFinder、Linuxは既定のファイルマネージャーを呼び出します。
 
 16個のURLを貼った場合、既定では2作品を同時に保存し、終わった枠に次の作品を入れます。並行数は1〜4。作者URLは列挙できたイラスト・漫画・うごイラ・小説に展開し、単体URLとの重複を除きます。TUIは作品数の選択上限なしですが、共有の要求予算500件は維持します。
 
@@ -74,6 +79,12 @@ opixiv fetch --input urls.txt --online --all --jobs 2 --out archive
 
 オンラインのリクエスト開始間隔は全ワーカーで共有し、既定2秒。401・403・429、リダイレクト、HTML応答では全体を停止します。自動リトライはせず、再実行で再開します。`--all` は作品数の選択上限を外す指定で、要求予算や閲覧条件を変更しません。現状は匿名取得のみ、公開・全年齢と確認できる作品だけを対象とします。
 
+## 速度について
+
+既定の「リクエスト開始間隔2秒」は、APIと画像取得の全ワーカーで共有するツール側の設定です。1枚絵を16作品、新規保存すると、詳細16回＋ページ情報16回＋画像16回の約48リクエストとなり、開始間隔だけで少なくとも約94秒かかります。作者URLの列挙や追加素材があればさらに増えます。並行数4でも、転送の重なりが増える一方で、この開始間隔は共有されます。
+
+さらに転送・原子的な書き込み・ハッシュ照合・うごイラのCRC検査がかかります。利用者の回線・ストレージ別の内訳は未測定です。新しい実行結果には所要時間、送信間隔の待機時間、リクエスト数を表示し、F3と `last-run.json` でも確認できます。送信間隔の待機は他作品の転送と重なるため、所要時間から差し引いた値を転送時間とは扱いません。詳細は[速度の仕組み](docs/SPEED_JA.md)を参照してください。
+
 ## 開発と検証
 
 ```sh
@@ -86,7 +97,7 @@ python tools/check_rust_compat.py target/debug/opixiv
 
 Windowsの互換性確認では最後のパスを `target/debug/opixiv.exe` にしてください。Pythonは旧版との比較検証にのみ必要で、Rust版の実行時には呼び出しません。
 
-Rustテスト25件、旧Pythonテスト49件、両方向のアーカイブ互換性検査をLinuxで実施しています。実ターミナルでもデモ保存・検査・ZIP出力・終了を確認済みです。GitHub ActionsにWindows／Linuxのビルド・テストと実行ファイルのartifact出力を追加しています。CIの成功とWindows実機での表示確認は区別します。
+Rustテスト29件、旧Pythonテスト49件、両方向のアーカイブ互換性検査をLinuxで実施しています。実ターミナルでもデモ保存・検査・ZIP出力・終了を確認済みです。GitHub ActionsにWindows／Linuxのビルド・テストと実行ファイルのartifact出力を追加しています。CIの成功とWindows実機での表示確認は区別します。
 
 | 場所 | 内容 |
 |---|---|

@@ -1,6 +1,6 @@
 [package]
 name = "open-pixiv-downloader"
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.2"
 edition = "2021"
 description = "Local Pixiv archive CLI and Ratatui terminal interface"
 license = "MIT"

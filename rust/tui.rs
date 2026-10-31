@@ -1,13 +1,14 @@
 use crate::{
-    archive::Archive,
+    archive::{safe_path, Archive},
     error::{invalid, Result},
     jobs::{self, Event, Options},
     target::Target,
 };
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event as InputEvent, KeyCode, KeyEvent,
-        KeyEventKind, KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event as InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+        MouseEvent, MouseEventKind,
     },
     execute,
 };
@@ -15,7 +16,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 use serde_json::Value;
@@ -283,6 +284,29 @@ struct Worker {
     handle: thread::JoinHandle<()>,
     stop: Arc<AtomicBool>,
 }
+struct WorkRow {
+    key: String,
+    status: String,
+    output: Option<PathBuf>,
+}
+impl WorkRow {
+    fn new(key: String, status: String, root: Option<&std::path::Path>) -> Self {
+        let output = root.and_then(|root| {
+            let (kind, id) = key.split_once('_')?;
+            if !matches!(kind, "art" | "novel") {
+                return None;
+            }
+            Target::new(kind, id).ok()?;
+            let path = safe_path(root, &format!("works/{key}")).ok()?;
+            path.is_dir().then_some(path)
+        });
+        Self {
+            key,
+            status,
+            output,
+        }
+    }
+}
 struct App {
     urls: Editor,
     out: Editor,
@@ -294,13 +318,14 @@ struct App {
     modal: Modal,
     modal_scroll: u16,
     worker: Option<Worker>,
-    rows: Vec<(String, String)>,
+    rows: Vec<WorkRow>,
+    run_out: Option<PathBuf>,
+    selected: usize,
     logs: VecDeque<String>,
     done: usize,
     total: usize,
     status: String,
     last: Option<Value>,
-    scroll: usize,
 }
 impl Default for App {
     fn default() -> Self {
@@ -316,6 +341,8 @@ impl Default for App {
             modal_scroll: 0,
             worker: None,
             rows: vec![],
+            run_out: None,
+            selected: 0,
             logs: VecDeque::from([
                 "Welcome to Open Pixiv Downloader!".into(),
                 "作品・作者・小説シリーズのURLを貼り付けてください。".into(),
@@ -324,11 +351,41 @@ impl Default for App {
             total: 0,
             status: "READY".into(),
             last: None,
-            scroll: 0,
         }
     }
 }
 impl App {
+    fn set_row(&mut self, key: String, status: String) {
+        let row = WorkRow::new(key, status, self.run_out.as_deref());
+        if let Some(old) = self.rows.iter_mut().find(|r| r.key == row.key) {
+            *old = row;
+        } else {
+            self.rows.push(row);
+        }
+    }
+    fn folder(&self, selected: bool) -> Result<PathBuf> {
+        if selected {
+            self.rows
+                .get(self.selected)
+                .and_then(|r| r.output.clone())
+                .ok_or_else(|| invalid("選択した作品の保存フォルダーはまだありません。"))
+        } else {
+            let value = self.out.value.trim();
+            if value.is_empty() {
+                return Err(invalid("保存先を入力してください。"));
+            }
+            Ok(PathBuf::from(value))
+        }
+    }
+    fn open_folder(&mut self, selected: bool) {
+        match self
+            .folder(selected)
+            .and_then(|p| crate::folder::open(&p).map(|()| p))
+        {
+            Ok(path) => self.log(format!("フォルダーを開きました: {}", path.display())),
+            Err(e) => self.log(e.to_string()),
+        }
+    }
     fn summary(&self) -> String {
         let Some(v) = &self.last else {
             return "まだ結果はありません。".into();
@@ -342,6 +399,13 @@ impl App {
             lines.push(format!(
                 "過去の除外 {} / 上限で保留 {}",
                 v["previous_exclusions"], v["deferred_by_limit"]
+            ));
+        }
+        if let Some(elapsed) = v["elapsed_seconds"].as_f64() {
+            lines.push(format!(
+                "所要 {elapsed:.1}秒 / 送信間隔の待機 {:.1}秒 / {}リクエスト",
+                v["rate_wait_seconds"].as_f64().unwrap_or(0.0),
+                v["requests"]
             ));
         }
         if let Some(reason) = v["reason"].as_str() {
@@ -396,6 +460,11 @@ impl App {
         if let Some(targets) = v["selected_targets"].as_array() {
             for t in targets {
                 lines.push(t.as_str().unwrap_or("").into());
+            }
+        }
+        for row in &self.rows {
+            if let Some(path) = &row.output {
+                lines.push(format!("\n{} の保存先: {}", row.key, path.display()));
             }
         }
         clean_lines(&lines.join("\n"))
@@ -455,11 +524,14 @@ impl App {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let op = operation.to_owned();
-        self.rows.clear();
+        if matches!(operation, "fetch" | "plan") {
+            self.rows.clear();
+            self.run_out = None;
+            self.selected = 0;
+        }
         self.last = None;
         self.done = 0;
         self.total = 0;
-        self.scroll = 0;
         self.status = operation.to_uppercase();
         self.log(format!(
             "{} / {}",
@@ -509,6 +581,8 @@ impl App {
         let mut finished = false;
         for e in events {
             match e {
+                Event::ArchiveOpened(root) => self.run_out = Some(root),
+                Event::Existing { key, status } => self.set_row(key, status),
                 Event::Message(s) => self.log(s),
                 Event::Selected {
                     total,
@@ -519,7 +593,7 @@ impl App {
                     self.total = total;
                     self.log(format!("対象 {total} / 保存済み {already} / 保留 {deferred} / 過去の除外 {excluded}"));
                 }
-                Event::Started(key) => self.rows.push((key, "saving".into())),
+                Event::Started(key) => self.set_row(key, "saving".into()),
                 Event::Progress {
                     key,
                     status,
@@ -528,9 +602,7 @@ impl App {
                 } => {
                     self.done = done;
                     self.total = total;
-                    if let Some(row) = self.rows.iter_mut().find(|r| r.0 == key) {
-                        row.1 = status.clone();
-                    }
+                    self.set_row(key.clone(), status.clone());
                     self.log(format!("{key} · {status}"));
                 }
                 Event::Finished(value) => {
@@ -550,8 +622,9 @@ impl App {
                     self.log(format!("結果: {}", self.status));
                     if let Some(targets) = value["selected_targets"].as_array() {
                         for t in targets.iter().take(1000) {
-                            self.rows
-                                .push((t.as_str().unwrap_or("").into(), "planned".into()));
+                            if let Some(target) = t.as_str().and_then(|s| Target::parse(s).ok()) {
+                                self.set_row(target.key(), "planned".into());
+                            }
                         }
                     }
                     if value.get("valid").is_some() {
@@ -577,6 +650,13 @@ impl App {
                             value["unattempted_selected"],
                             value["previous_exclusions"],
                             value["deferred_by_limit"]
+                        ));
+                    }
+                    if let Some(elapsed) = value["elapsed_seconds"].as_f64() {
+                        self.log(format!(
+                            "所要 {elapsed:.1}秒 / 間隔待ち {:.1}秒 / {}回",
+                            value["rate_wait_seconds"].as_f64().unwrap_or(0.0),
+                            value["requests"]
                         ));
                     }
                     self.last = Some(value);
@@ -649,6 +729,14 @@ impl App {
             self.modal_scroll = 0;
             return false;
         }
+        if key.code == KeyCode::F(6) {
+            self.open_folder(false);
+            return false;
+        }
+        if key.code == KeyCode::F(7) {
+            self.open_folder(true);
+            return false;
+        }
         if key.code == KeyCode::Esc {
             if self.worker.is_some() {
                 self.cancel();
@@ -657,14 +745,39 @@ impl App {
             return true;
         }
         if key.code == KeyCode::PageDown {
-            self.scroll = self
-                .scroll
+            self.selected = self
+                .selected
                 .saturating_add(5)
                 .min(self.rows.len().saturating_sub(1));
             return false;
         }
         if key.code == KeyCode::PageUp {
-            self.scroll = self.scroll.saturating_sub(5);
+            self.selected = self.selected.saturating_sub(5);
+            return false;
+        }
+        if self.focus == 3 {
+            match key.code {
+                KeyCode::Up => {
+                    self.selected = self.selected.saturating_sub(1);
+                    return false;
+                }
+                KeyCode::Down => {
+                    self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1));
+                    return false;
+                }
+                KeyCode::Enter => {
+                    self.open_folder(true);
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        if key.code == KeyCode::Tab {
+            self.focus = (self.focus + 1) % 4;
+            return false;
+        }
+        if key.code == KeyCode::BackTab {
+            self.focus = (self.focus + 3) % 4;
             return false;
         }
         if self.worker.is_some() {
@@ -693,8 +806,6 @@ impl App {
             }
             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => self.start("verify"),
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::ALT) => self.start("pack"),
-            KeyCode::Tab => self.focus = (self.focus + 1) % 3,
-            KeyCode::BackTab => self.focus = (self.focus + 2) % 3,
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.logs.clear();
                 self.rows.clear();
@@ -702,7 +813,7 @@ impl App {
             _ => match self.focus {
                 0 => self.urls.key(key, true),
                 1 => self.out.key(key, false),
-                _ => match key.code {
+                2 => match key.code {
                     KeyCode::Left | KeyCode::Char('-') => {
                         self.jobs = self.jobs.saturating_sub(1).max(1)
                     }
@@ -712,9 +823,51 @@ impl App {
                     }
                     _ => {}
                 },
+                _ => {}
             },
         }
         false
+    }
+    fn mouse(&mut self, event: MouseEvent, area: Rect) {
+        if self.modal != Modal::None {
+            return;
+        }
+        let Some(view) = View::new(area) else {
+            return;
+        };
+        let point = ratatui::layout::Position::new(event.column, event.row);
+        if event.kind == MouseEventKind::Down(MouseButton::Left) {
+            let (root, work) = buttons(view.footer);
+            if root.contains(point) {
+                self.open_folder(false);
+                return;
+            }
+            if work.contains(point) {
+                self.open_folder(true);
+                return;
+            }
+            let rows = view.queue.inner(ratatui::layout::Margin::new(1, 1));
+            if rows.contains(point) && event.row > rows.y {
+                let visible = rows.height.saturating_sub(1) as usize;
+                let offset = self.table_offset(visible);
+                let selected = offset + (event.row - rows.y - 1) as usize;
+                if selected < self.rows.len() {
+                    self.selected = selected;
+                    self.focus = 3;
+                }
+            }
+        } else if view.queue.contains(point) {
+            match event.kind {
+                MouseEventKind::ScrollDown => {
+                    self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1))
+                }
+                MouseEventKind::ScrollUp => self.selected = self.selected.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    fn table_offset(&self, visible: usize) -> usize {
+        self.selected.saturating_sub(visible.saturating_sub(1))
     }
 }
 fn clean(value: &str) -> String {
@@ -763,6 +916,89 @@ fn editor(
         }
     }
 }
+struct View {
+    body: Rect,
+    header: Rect,
+    fields: Rect,
+    queue: Rect,
+    activity: Rect,
+    footer: Rect,
+    large: bool,
+}
+impl View {
+    fn new(area: Rect) -> Option<Self> {
+        let margin = if area.width >= 60 { 2 } else { 0 };
+        let body = area.inner(ratatui::layout::Margin::new(margin, 1));
+        if body.height < 10 || body.width < 32 {
+            return None;
+        }
+        let large = body.height >= 23 && body.width >= 48;
+        let chunks = Layout::vertical([
+            Constraint::Length(if large { 8 } else { 2 }),
+            Constraint::Min(7),
+            Constraint::Length(3),
+        ])
+        .split(body);
+        let main = if body.width >= 96 {
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .split(chunks[1])
+        } else {
+            Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)])
+                .split(chunks[1])
+        };
+        let queue = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(if main[1].height >= 14 { 5 } else { 3 }),
+        ])
+        .split(main[1]);
+        Some(Self {
+            body,
+            header: chunks[0],
+            fields: main[0],
+            queue: queue[0],
+            activity: queue[1],
+            footer: chunks[2],
+            large,
+        })
+    }
+}
+fn button_labels(footer: Rect) -> (&'static str, &'static str) {
+    if footer.width >= 70 {
+        ("[ F6 保存先を開く ]", "[ F7 選択作品を開く ]")
+    } else {
+        ("[F6 保存先]", "[F7 選択作品]")
+    }
+}
+fn buttons(footer: Rect) -> (Rect, Rect) {
+    let (root, work) = button_labels(footer);
+    let y = footer.y.saturating_add(1);
+    let root_width = UnicodeWidthStr::width(root) as u16;
+    let work_width = UnicodeWidthStr::width(work) as u16;
+    (
+        Rect::new(footer.x, y, root_width, 1),
+        Rect::new(footer.x + root_width + 1, y, work_width, 1),
+    )
+}
+fn path_label(path: Option<&std::path::Path>, width: usize) -> String {
+    let Some(path) = path else {
+        return "—".into();
+    };
+    let text = clean(&path.to_string_lossy());
+    if UnicodeWidthStr::width(text.as_str()) <= width {
+        return text;
+    }
+    let mut reversed = Vec::new();
+    let mut length = 1;
+    for c in text.chars().rev() {
+        let w = UnicodeWidthStr::width(c.to_string().as_str());
+        if length + w > width {
+            break;
+        }
+        length += w;
+        reversed.push(c);
+    }
+    format!("…{}", reversed.into_iter().rev().collect::<String>())
+}
 fn draw(frame: &mut Frame, app: &App, no_color: bool) {
     draw_inner(frame, app, no_color);
     if no_color {
@@ -782,20 +1018,12 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         ),
         area,
     );
-    let margin = if area.width >= 60 { 2 } else { 0 };
-    let body = area.inner(ratatui::layout::Margin::new(margin, 1));
-    if body.height < 10 || body.width < 32 {
-        frame.render_widget(Paragraph::new("OPEN PIXIV DOWNLOADER\n\n端末を32桁×12行以上に広げてください。\nEsc / Ctrl+C: 終了").wrap(Wrap{trim:false}),body);
+    let Some(view) = View::new(area) else {
+        frame.render_widget(Paragraph::new("OPEN PIXIV DOWNLOADER\n\n端末を32桁×12行以上に広げてください。\nEsc / Ctrl+C: 終了").wrap(Wrap{trim:false}),area);
         return;
-    }
-    let large = body.height >= 23 && body.width >= 48;
-    let chunks = Layout::vertical([
-        Constraint::Length(if large { 8 } else { 2 }),
-        Constraint::Min(7),
-        Constraint::Length(2),
-    ])
-    .split(body);
-    if large {
+    };
+    let body = view.body;
+    if view.large {
         let word = if UnicodeWidthStr::width(logo("OPEN PIXIV")[0].as_str()) <= body.width as usize
         {
             "OPEN PIXIV"
@@ -829,25 +1057,19 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
                 .style(Style::default().fg(if no_color { Color::Reset } else { MUTED }))
                 .alignment(Alignment::Center),
         );
-        frame.render_widget(Paragraph::new(lines), chunks[0]);
+        frame.render_widget(Paragraph::new(lines), view.header);
     } else {
         frame.render_widget(
             Paragraph::new("OPEN PIXIV DOWNLOADER · Rust + Ratatui")
                 .style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-            chunks[0],
+            view.header,
         );
     }
-    let main = if body.width >= 96 {
-        Layout::horizontal([Constraint::Percentage(57), Constraint::Percentage(43)])
-            .split(chunks[1])
-    } else {
-        Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).split(chunks[1])
-    };
     let fields = Layout::vertical([
         Constraint::Min(3),
-        Constraint::Length(if main[0].height >= 12 { 6 } else { 3 }),
+        Constraint::Length(if view.fields.height >= 12 { 6 } else { 3 }),
     ])
-    .split(main[0]);
+    .split(view.fields);
     editor(
         frame,
         fields[0],
@@ -901,11 +1123,6 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             opts[1],
         );
     }
-    let queue = Layout::vertical([
-        Constraint::Min(3),
-        Constraint::Length(if main[1].height >= 14 { 5 } else { 3 }),
-    ])
-    .split(main[1]);
     if app.rows.is_empty() {
         frame.render_widget(
             Paragraph::new(vec![
@@ -915,31 +1132,51 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
                 Line::from("  URL入力 → Ctrl+S: 保存を確認"),
                 Line::from("  F5: 対象一覧 / Alt+V: 検査"),
                 Line::from("  Alt+E: ZIP出力 / F1: ヘルプ"),
+                Line::from("  F6: 保存先 / F7: 選択作品を開く"),
             ])
             .block(panel("QUEUE / LIBRARY", false)),
-            queue[0],
+            view.queue,
         );
     } else {
-        let rows = app.rows.iter().skip(app.scroll).map(|(key, status)| {
-            Row::new([clean(key), status.clone()]).style(Style::default().fg(
-                match status.as_str() {
-                    "complete" | "already_complete" => CYAN,
-                    "saving" => BLUE,
-                    _ => Color::Yellow,
-                },
-            ))
+        let path_width = view.queue.width.saturating_sub(6) as usize * 44 / 100;
+        let rows = app.rows.iter().map(|row| {
+            Row::new([
+                clean(&row.key),
+                row.status.clone(),
+                path_label(row.output.as_deref(), path_width),
+            ])
+            .style(Style::default().fg(match row.status.as_str() {
+                "complete" | "already_complete" => CYAN,
+                "saving" => BLUE,
+                _ => Color::Yellow,
+            }))
         });
-        frame.render_widget(
+        let visible = view.queue.height.saturating_sub(3) as usize;
+        let mut state = TableState::default()
+            .with_offset(app.table_offset(visible))
+            .with_selected(Some(app.selected));
+        frame.render_stateful_widget(
             Table::new(
                 rows,
-                [Constraint::Percentage(54), Constraint::Percentage(46)],
+                [
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(26),
+                    Constraint::Percentage(44),
+                ],
             )
-            .header(Row::new(["WORK", "STATUS"]).style(Style::default().fg(MUTED)))
-            .block(panel("QUEUE · PgUp / PgDn", false)),
-            queue[0],
+            .header(Row::new(["WORK", "STATUS", "OUTPUT / PATH"]).style(Style::default().fg(MUTED)))
+            .highlight_symbol("› ")
+            .row_highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(27, 44, 62))
+                    .add_modifier(Modifier::BOLD),
+            )
+            .block(panel("QUEUE · ↑↓ 選択 / Enter 開く", app.focus == 3)),
+            view.queue,
+            &mut state,
         );
     }
-    let available = queue[1].height.saturating_sub(2) as usize;
+    let available = view.activity.height.saturating_sub(2) as usize;
     let logs: Vec<_> = app
         .logs
         .iter()
@@ -950,14 +1187,33 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         Paragraph::new(logs)
             .style(Style::default().fg(MUTED))
             .block(panel("ACTIVITY", false)),
-        queue[1],
+        view.activity,
     );
-    let foot = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[2]);
+    let foot = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(view.footer);
     let ratio = if app.total > 0 {
         (app.done as f64 / app.total as f64).min(1.0)
     } else {
         0.0
     };
+    let (root, work) = buttons(view.footer);
+    let (root_label, work_label) = button_labels(view.footer);
+    frame.render_widget(
+        Paragraph::new(root_label).style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+        root,
+    );
+    let can_open = app
+        .rows
+        .get(app.selected)
+        .is_some_and(|r| r.output.is_some());
+    frame.render_widget(
+        Paragraph::new(work_label).style(Style::default().fg(if can_open { CYAN } else { MUTED })),
+        work,
+    );
     frame.render_widget(
         Gauge::default()
             .ratio(ratio)
@@ -980,12 +1236,12 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             "Tab 設定移動   F2 デモ   F3 結果   Ctrl+S 保存   F1 ヘルプ   Esc 停止/終了",
         )
         .style(Style::default().fg(MUTED)),
-        foot[1],
+        foot[2],
     );
     if app.modal != Modal::None {
         let width = body.width.min(72);
         let height = body.height.min(match app.modal {
-            Modal::Help => 18,
+            Modal::Help => 20,
             Modal::Result => 24,
             _ => 12,
         });
@@ -997,7 +1253,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         );
         frame.render_widget(Clear, popup);
         let text = if app.modal == Modal::Help {
-            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF5: 対象一覧を確認（媒体は保存しません）\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜4\nPgUp / PgDn: 作品一覧のスクロール\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
+            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜4\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
         } else if app.modal == Modal::Result {
             app.summary()
         } else {
@@ -1034,7 +1290,8 @@ pub fn run() -> Result<()> {
     let mut terminal = ratatui::init();
     // Ratatui's panic hook restores terminal state; the ordinary path also disables paste.
     let result = (|| -> Result<()> {
-        execute!(io::stdout(), EnableBracketedPaste)?;
+        let _input_modes = InputModes;
+        execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
         let mut app = App::default();
         loop {
             app.poll();
@@ -1045,6 +1302,10 @@ pub fn run() -> Result<()> {
                         if app.key(key) {
                             break;
                         }
+                    }
+                    InputEvent::Mouse(mouse) => {
+                        let size = terminal.size()?;
+                        app.mouse(mouse, Rect::new(0, 0, size.width, size.height));
                     }
                     InputEvent::Paste(text) if app.worker.is_none() && app.modal == Modal::None => {
                         match app.focus {
@@ -1063,9 +1324,14 @@ pub fn run() -> Result<()> {
         }
         Ok(())
     })();
-    let _ = execute!(io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
+}
+struct InputModes;
+impl Drop for InputModes {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
+    }
 }
 impl Drop for App {
     fn drop(&mut self) {
@@ -1157,5 +1423,109 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         assert_eq!(app.urls.value, "art:123\nnovel:456");
         assert_eq!(app.out.value, "D:/My archive");
+    }
+    fn finish(app: &mut App) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.worker.is_some() {
+            app.poll();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "TUI worker did not finish"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn saved_and_resumed_rows_keep_actual_paths_after_settings_change_and_verify() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("保存先 空白");
+        let mut app = App::default();
+        app.demo = true;
+        app.urls = Editor::new("user:9001");
+        app.out = Editor::new(out.to_str().unwrap());
+        app.start("fetch");
+        finish(&mut app);
+        assert_eq!(app.rows.len(), 4);
+        assert!(app
+            .rows
+            .iter()
+            .all(|r| r.status == "complete" && r.output.as_ref().is_some_and(|p| p.is_dir())));
+        let actual = app.folder(true).unwrap();
+        app.out = Editor::new("different-folder");
+        assert_eq!(app.folder(true).unwrap(), actual);
+        app.out = Editor::new(out.to_str().unwrap());
+        app.start("verify");
+        finish(&mut app);
+        assert_eq!(app.rows.len(), 4);
+        app.start("fetch");
+        finish(&mut app);
+        assert_eq!(app.rows.len(), 4);
+        assert!(app
+            .rows
+            .iter()
+            .all(|r| r.status == "already_complete" && r.output.is_some()));
+        assert_eq!(app.last.as_ref().unwrap()["rate_wait_seconds"], 0.0);
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|f| draw(f, &app, false)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("OUTPUT / PATH"));
+        assert!(app.summary().contains("送信間隔の待機"));
+    }
+    #[test]
+    fn mouse_row_selection_and_folder_buttons_use_same_layout_as_render() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::default();
+        app.out = Editor::new(temp.path().join("missing").to_str().unwrap());
+        for i in 1..=12 {
+            app.set_row(format!("art_{i}"), "planned".into());
+        }
+        let area = Rect::new(0, 0, 120, 36);
+        let view = View::new(area).unwrap();
+        let row = view.queue.inner(ratatui::layout::Margin::new(1, 1));
+        app.mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: row.x,
+                row: row.y + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        );
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.focus, 3);
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected, 2);
+        let (root, work) = buttons(view.footer);
+        app.mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: root.x,
+                row: root.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        );
+        assert!(app.logs.back().unwrap().contains("まだありません"));
+        app.mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: work.x,
+                row: work.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        );
+        assert!(app.logs.back().unwrap().contains("選択した作品"));
+        assert!(
+            WorkRow::new("art_../escape".into(), "complete".into(), Some(temp.path()))
+                .output
+                .is_none()
+        );
     }
 }

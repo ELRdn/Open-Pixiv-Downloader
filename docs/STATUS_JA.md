@@ -2,7 +2,9 @@
 
 更新：2026年10月31日。元の比較は2026年10月30日に実施。
 
-主実装をRust + Ratatuiへ移行した。Rustテスト25件、旧Pythonテスト49件、fmt・Clippy、両方向のアーカイブ互換性検査がLinuxで合格。Linuxの実ターミナルで、Rust版の起動、デモ保存、検査、ZIP出力、終了を確認した。PowerShell／Windows実機での検証は引き続き未実施。[移行記録](RUST_MIGRATION_JA.md)に検証範囲を記載する。
+主実装をRust + Ratatuiへ移行した。Rustテスト29件、旧Pythonテスト49件、fmt・Clippy、両方向のアーカイブ互換性検査がLinuxで合格。Linuxの実ターミナルで、Rust版の起動、デモ保存、検査、ZIP出力、終了を確認した。PowerShell／Windows実機での検証は引き続き未実施。[移行記録](RUST_MIGRATION_JA.md)に検証範囲を記載する。
+
+フォルダーを開くボタン、3列の作品一覧、待機時間の計測を追加。[追加検証](evidence/output-paths.json)ではLinux実PTYから模擬ファイルマネージャーへ渡すパスを照合した。Windowsエクスプローラー自体の実機操作は未確認。
 
 ## 確認済み
 
