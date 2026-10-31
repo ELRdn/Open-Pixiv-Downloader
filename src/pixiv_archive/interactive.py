@@ -99,7 +99,6 @@ def report(event, data):
 
 def run(execute):
     welcome()
-    help_text()
     last_folder, last_jobs = "archive", "2"
     online_folder = "archive"
     try:
