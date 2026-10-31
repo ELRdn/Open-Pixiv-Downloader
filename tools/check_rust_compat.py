@@ -37,6 +37,8 @@ def main() -> None:
         assert run(binary, "pack", rust_archive, work / "rust-export.zip")["complete_works"] == 4
 
         run(*legacy, "fetch", "user:9001", "--fixture", fixture, "--all", "--jobs", "2", "--out", python_archive)
+        collected = run(binary, "collect", python_archive)
+        assert collected["collection"]["copied"] == 6 and collected["status"] == "complete", collected
         assert run(binary, "verify", python_archive)["valid"] == 4
         resumed = run(binary, "fetch", "user:9001", "--demo", "--all", "--out", python_archive)
         assert resumed["already_complete"] == 4 and resumed["selected"] == 0, resumed

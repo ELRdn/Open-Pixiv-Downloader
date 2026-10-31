@@ -1,4 +1,5 @@
 use crate::{
+    collection,
     error::{invalid, Error, Result},
     novel,
     target::Target,
@@ -513,6 +514,24 @@ impl Archive {
         }
         atomic(&safe_path(&self.root, "catalog.jsonl")?, content.as_bytes())?;
         Ok(rows.len())
+    }
+    pub fn collect_work(&self, target: &Target, cancel: &dyn Fn() -> bool) -> collection::Report {
+        collection::work(&self.root, target, self.manifest(target), cancel)
+    }
+    pub fn collect(&self, cancel: &dyn Fn() -> bool) -> Result<Value> {
+        collection::prepare(&self.root)?;
+        let mut report = collection::Report::default();
+        for (target, status, _, _) in self.rows()? {
+            if !matches!(status.as_str(), "complete" | "partial") {
+                continue;
+            }
+            report.merge(self.collect_work(&target, cancel));
+            if report.cancelled {
+                break;
+            }
+        }
+        let value = report.write(&self.root)?;
+        Ok(json!({"status":value["status"],"collection":value}))
     }
     pub fn verify(&self) -> Result<Value> {
         let mut checked = 0;

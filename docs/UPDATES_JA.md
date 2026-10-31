@@ -25,7 +25,7 @@ cargo install --git https://github.com/ELRdn/Open-Pixiv-Downloader.git --branch 
 
 起動後は保存処理のないタイミングで1時間ごとに確認する。応答待ちでURL入力や保存処理をブロックしない。通信失敗・不正なTOML・別の製品名・不正なバージョンは「確認不可」とし、最新版と判定しない。すでに新しい版の存在を確認した後の一時的な通信失敗では、その通知を保持する。
 
-自動確認を止める場合は `opixiv --no-update-check` または環境変数 `OPIXIV_NO_UPDATE_CHECK=1`。この場合もF8による明示的な手動確認は可能。引数付きCLIのplan / fetch / verify / packでは確認しない。合成デモの保存は通信しないが、通常のTUI起動時の更新確認は別の通信である。
+自動確認を止める場合は `opixiv --no-update-check` または環境変数 `OPIXIV_NO_UPDATE_CHECK=1`。この場合もF8による明示的な手動確認は可能。引数付きCLIのplan / fetch / verify / collect / packでは確認しない。合成デモの保存は通信しないが、通常のTUI起動時の更新確認は別の通信である。
 
 ## 検証範囲
 

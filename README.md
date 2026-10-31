@@ -19,7 +19,7 @@ opixiv
 
 更新も同じインストールコマンド1行で行えます。作業フォルダーの移動や `git pull` は不要です。リポジトリから開発・試用する場合は、cloneしたフォルダー内で `cargo run --release --locked` を使えます。Rust版の実行にPythonは必要ありません。デモ用データも実行ファイルに組み込まれています。
 
-以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.3` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
+以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.4` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
 
 ## 操作
 
@@ -31,6 +31,8 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 | Enter | URL欄で改行、確認画面で保存開始 |
 | F2 | デモ／匿名オンラインを切り替え。入力と保存先はモード別に保持 |
 | F3 | 結果・欠損・停止理由の詳細。↑↓でスクロール |
+| F4 | 画像・小説の集約。Enterで既存分を集約・補完、I / Nでフォルダーを開く |
+| Alt+I / Alt+N | 集約した画像／小説のフォルダーを開く。画面下のボタンでも操作可能 |
 | F5 | 対象一覧を確認。媒体はダウンロードしない |
 | Ctrl+S | 保存内容の確認を開く |
 | Alt+V | 選択した保存先の整合性を検査 |
@@ -56,6 +58,33 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 
 更新確認は固定のGitHub URLへ接続します。合成デモの保存処理とは別の通信です。完全にオフラインで起動する場合は `opixiv --no-update-check`、または環境変数 `OPIXIV_NO_UPDATE_CHECK=1` を使用してください。引数付きの保存・検査コマンドでは更新確認をしません。通信失敗時は確認できなかった旨を表示し、作品の保存操作は続けられます。[更新確認の仕様](docs/UPDATES_JA.md)も参照してください。
 
+## 必要なファイルだけを集める
+
+作品別の保存に加えて、保存後に `archive/works/image` と `archive/works/novel` へコピーを自動で作ります。
+
+```text
+archive/works/
+├─ image/
+│  ├─ art_130117333_p0000.jpg
+│  └─ art_130117333_p0001.jpg
+├─ novel/
+│  └─ novel_29500410.txt
+├─ art_130117333/       （従来の作品別保存）
+└─ novel_29500410/      （従来の作品別保存）
+```
+
+小説は `plain.txt` の本文を作品ID付きの `.txt` に、画像は元画像を作品ID・ページ番号付きの名前にします。うごイラは元ZIPとフレームの表示時間のJSONを集約します。小説の表紙・挿絵・構造付きHTMLは作品別フォルダーに残ります。`raw.json` や作品のmanifestは集約フォルダーへコピーしません。
+
+既存の保存済み作品は **F4 → Enter**、または次で通信せずに集約できます。
+
+```powershell
+opixiv collect archive
+```
+
+**Alt+Iで画像、Alt+Nで小説のフォルダーを開けます。** 同じ内容のファイルは増やさず、削除した集約ファイルは再集約で補完します。集約先で編集したファイルや同名の異なるファイルは上書きせず、F3と `collection-report.json` に問題を表示します。
+
+集約は独立したコピーなので、集約先を編集しても作品別の元ファイルは変わりません。その分、画像などのコピーに必要なディスク容量を使います。集約先の名前はIDを基準に固定し、複数作品の `0000.jpg` や `plain.txt` が衝突しないようにしています。[詳しい仕様](docs/COLLECTION_JA.md)を参照してください。
+
 ## 保存コア
 
 - イラスト・漫画：元画像とページ順を保存し、ページ数を照合。
@@ -74,6 +103,7 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 opixiv plan user:9001 --demo --all --out demo-archive
 opixiv fetch user:9001 art:1001 --demo --all --jobs 2 --out demo-archive
 opixiv verify demo-archive
+opixiv collect demo-archive
 opixiv pack demo-archive demo-export.zip
 
 # UTF-8の一覧ファイル。空行、#コメント、BOMに対応
@@ -103,7 +133,7 @@ python tools/check_rust_compat.py target/debug/opixiv
 
 Windowsの互換性確認では最後のパスを `target/debug/opixiv.exe` にしてください。Pythonは旧版との比較検証にのみ必要で、Rust版の実行時には呼び出しません。
 
-Rustテスト34件、旧Pythonテスト49件、両方向のアーカイブ互換性検査をLinuxで実施しています。実ターミナルでもデモ保存・検査・ZIP出力・終了を確認済みです。GitHub ActionsにWindows／Linuxのビルド・テストと実行ファイルのartifact出力を追加しています。CIの成功とWindows実機での表示確認は区別します。
+Rustテスト39件、旧Pythonテスト49件、両方向のアーカイブ互換性検査をLinuxで実施しています。実ターミナルでもデモ保存・検査・ZIP出力・終了を確認済みです。GitHub ActionsにWindows／Linuxのビルド・テストと実行ファイルのartifact出力を追加しています。CIの成功とWindows実機での表示確認は区別します。
 
 | 場所 | 内容 |
 |---|---|

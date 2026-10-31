@@ -1,5 +1,6 @@
 use crate::{
     archive::{atomic, discover, now, safe_path, Archive, SharedArchive},
+    collection,
     error::{invalid, Error, Result},
     target::Target,
     transport::{Fixture, Online, Transport, DEMO},
@@ -151,6 +152,7 @@ pub fn run(
     let archive = Arc::new(Archive::open(&options.out, false)?);
     emit(Event::ArchiveOpened(archive.root.clone()));
     let mut report = json!({"tool_version":env!("CARGO_PKG_VERSION"),"started_at":now(),"mode":if options.online {"anonymous_online_unvalidated"} else {"synthetic_offline"},"targets":targets.iter().map(Target::label).collect::<Vec<_>>(),"target":if targets.len()==1 {targets[0].label()} else {"batch".into()},"jobs":options.jobs,"limit":if options.all {Value::Null} else {json!(options.limit)},"status":"running","results":[]});
+    let mut collected = collection::Report::default();
     emit(Event::Message("対象作品を確認しています…".into()));
     let action = (|| -> Result<()> {
         let mut refs = Vec::new();
@@ -173,6 +175,12 @@ pub fn run(
                     key: r.key(),
                     status: "already_complete".into(),
                 });
+                if !plan {
+                    collected.merge(archive.collect_work(&r, &|| client.stopped()));
+                    if collected.cancelled {
+                        return Err(Error::Stop("集約を中断しました。".into()));
+                    }
+                }
             } else if !options.retry_unavailable
                 && matches!(
                     archive.status(&r)?.as_deref(),
@@ -221,6 +229,7 @@ pub fn run(
             &selected,
             options.jobs,
             &mut report,
+            &mut collected,
             &emit,
         )?;
         let complete = report["results"]
@@ -246,6 +255,16 @@ pub fn run(
             "failed"
         });
         report["reason"] = json!(e.to_string());
+    }
+    if !plan {
+        if let Err(e) = collected.write(&archive.root) {
+            collected.problem("", "collection-report.json", e);
+        }
+        report["collection"] = collected.value(&archive.root)?;
+        if !collected.problems.is_empty() && report["status"] == "complete" {
+            report["archive_status"] = json!("complete");
+            report["status"] = json!("partial");
+        }
     }
     let results = report["results"].as_array().unwrap();
     let result_count = results.len();
@@ -286,6 +305,7 @@ fn schedule(
     selected: &[Target],
     jobs: usize,
     report: &mut Value,
+    collected: &mut collection::Report,
     emit: &(impl Fn(Event) + Sync),
 ) -> Result<()> {
     let (tx, rx) = mpsc::channel();
@@ -304,14 +324,21 @@ fn schedule(
             let tx = tx.clone();
             handles.push(thread::spawn(move || {
                 let result = a.save(&target, c.as_ref());
-                let _ = tx.send((target, result));
+                let collected = if result.as_ref().is_ok_and(|s| {
+                    matches!(s.as_str(), "complete" | "partial" | "already_complete")
+                }) {
+                    Some(a.collect_work(&target, &|| c.stopped()))
+                } else {
+                    None
+                };
+                let _ = tx.send((target, result, collected));
             }));
         }
         if active == 0 {
             break;
         }
         // A worker panic must close the channel rather than leave the receiver blocked.
-        let (target, result) = loop {
+        let (target, result, work_collection) = loop {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(v) => break v,
                 Err(mpsc::RecvTimeoutError::Timeout) if handles.iter().any(|h| h.is_finished()) => {
@@ -336,6 +363,9 @@ fn schedule(
             }
         };
         active -= 1;
+        if let Some(work_collection) = work_collection {
+            collected.merge(work_collection);
+        }
         let status = match result {
             Ok(s) => s,
             Err(e) => {
@@ -387,6 +417,48 @@ fn schedule(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automatic_collection_backfills_without_redownload_and_preserves_edited_copies() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("archive");
+        let options = Options {
+            demo: true,
+            targets: vec!["art:1001".into()],
+            out: out.clone(),
+            ..Default::default()
+        };
+        let first = run(options.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(first["collection"]["copied"], 1);
+        let output = out.join("works/image/art_1001_p0000.png");
+        fs::remove_file(&output).unwrap();
+        let second = run(options.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(second["requests"], 0);
+        assert_eq!(second["already_complete"], 1);
+        assert_eq!(second["collection"]["copied"], 1);
+        fs::write(&output, b"my edited copy").unwrap();
+        let third = run(options, false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(third["status"], "partial");
+        assert_eq!(third["archive_status"], "complete");
+        assert_eq!(third["collection"]["problems"].as_array().unwrap().len(), 1);
+        assert_eq!(fs::read(output).unwrap(), b"my edited copy");
+        assert_eq!(
+            Archive::open(&out, true).unwrap().verify().unwrap()["valid"],
+            1
+        );
+        let plan_out = temp.path().join("plan");
+        run(
+            Options {
+                demo: true,
+                out: plan_out.clone(),
+                ..Default::default()
+            },
+            true,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert!(!plan_out.join("works/image").exists());
+    }
     struct OverlapTransport {
         fixture: Fixture,
         active: std::sync::atomic::AtomicUsize,
@@ -448,9 +520,15 @@ mod tests {
             ];
             let mut report = json!({"results":[]});
             let events = Mutex::new(Vec::new());
-            let result = schedule(&archive, &client, &selected, 2, &mut report, &|e| {
-                events.lock().unwrap().push(e)
-            });
+            let result = schedule(
+                &archive,
+                &client,
+                &selected,
+                2,
+                &mut report,
+                &mut collection::Report::default(),
+                &|e| events.lock().unwrap().push(e),
+            );
             if denied {
                 assert!(matches!(result, Err(Error::Stop(_))));
                 assert!(

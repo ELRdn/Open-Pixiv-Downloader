@@ -1,4 +1,5 @@
 mod archive;
+mod collection;
 mod error;
 mod folder;
 mod jobs;
@@ -43,6 +44,8 @@ enum Command {
     Fetch(FetchArgs),
     /// Verify saved checksums without network access
     Verify { out: PathBuf },
+    /// Collect saved images and plain novel text into works/image and works/novel
+    Collect { out: PathBuf },
     /// Export verified complete works to ZIP
     Pack { out: PathBuf, zip: PathBuf },
 }
@@ -123,6 +126,9 @@ fn execute() -> error::Result<i32> {
         Command::Plan(args) => jobs::run(args.into(), true, stop.clone(), |_| {})?,
         Command::Fetch(args) => jobs::run(args.into(), false, stop.clone(), |_| {})?,
         Command::Verify { out } => archive::Archive::open(&out, true)?.verify()?,
+        Command::Collect { out } => {
+            archive::Archive::open(&out, true)?.collect(&|| stop.load(Ordering::SeqCst))?
+        }
         Command::Pack { out, zip } => archive::Archive::open(&out, true)?.pack(&zip)?,
         Command::Tui => unreachable!(),
     };

@@ -280,6 +280,7 @@ enum Modal {
     Confirm,
     Result,
     Update,
+    Collection,
 }
 struct Worker {
     receiver: mpsc::Receiver<Event>,
@@ -367,6 +368,28 @@ impl Default for App {
     }
 }
 impl App {
+    fn open_collection(&mut self, kind: &str) {
+        if self.out.value.trim().is_empty() {
+            self.log("保存先を入力してください。".into());
+            return;
+        }
+        let root = std::path::Path::new(self.out.value.trim());
+        let result = safe_path(root, &format!("works/{kind}"))
+            .and_then(|p| crate::folder::open(&p).map(|()| p));
+        match result {
+            Ok(path) => self.log(format!("フォルダーを開きました: {}", path.display())),
+            Err(e) => self.log(e.to_string()),
+        }
+    }
+    fn collection_details(&self) -> String {
+        if self.out.value.trim().is_empty() {
+            return "保存先を入力してください。Escで戻れます。".into();
+        }
+        let root = std::env::current_dir()
+            .unwrap_or_default()
+            .join(self.out.value.trim());
+        format!("{}\nI: 画像を開く / N: 小説を開く / Esc: 戻る\n↑↓: スクロール\n\n画像: {}\n小説: {}\n\n新しく保存した作品は自動で集約します。\n画像は作品ID＋ページ番号、小説は作品ID.txtで保存します。\nコピーなので、集約先の編集は作品別の元ファイルに影響しません。",if self.worker.is_some(){"保存処理中です。終了後にEnterで既存分を集約できます。"}else{"Enter: 既存の保存済み作品を集約・補完（通信なし）"},root.join("works/image").display(),root.join("works/novel").display())
+    }
     fn check_update(&mut self) {
         if self.update_receiver.is_some() {
             return;
@@ -548,6 +571,28 @@ impl App {
                 lines.push(format!("\n{} の保存先: {}", row.key, path.display()));
             }
         }
+        if let Some(c) = v.get("collection") {
+            lines.push(format!(
+                "\nファイル集約: コピー {} / 集約済み {} / 問題 {}",
+                c["copied"],
+                c["existing"],
+                c["problems"].as_array().map_or(0, Vec::len)
+            ));
+            for field in ["image_directory", "novel_directory"] {
+                if let Some(path) = c[field].as_str() {
+                    lines.push(path.into());
+                }
+            }
+            if let Some(problems) = c["problems"].as_array() {
+                for p in problems {
+                    lines.push(format!(
+                        "{}: {}",
+                        p["path"].as_str().unwrap_or(""),
+                        p["reason"].as_str().unwrap_or("")
+                    ));
+                }
+            }
+        }
         clean_lines(&lines.join("\n"))
     }
     fn log(&mut self, message: String) {
@@ -596,6 +641,10 @@ impl App {
                 }
             }
         } else {
+            if self.out.value.trim().is_empty() {
+                self.log("保存先を入力してください。".into());
+                return;
+            }
             Options {
                 out: PathBuf::from(self.out.value.trim()),
                 ..Default::default()
@@ -629,6 +678,8 @@ impl App {
                     let _ = tx.send(e);
                 }),
                 "verify" => Archive::open(&opts.out, true).and_then(|a| a.verify()),
+                "collect" => Archive::open(&opts.out, true)
+                    .and_then(|a| a.collect(&|| worker_stop.load(Ordering::SeqCst))),
                 "pack" => {
                     let mut dest = opts.out.as_os_str().to_owned();
                     dest.push("-export.zip");
@@ -741,6 +792,14 @@ impl App {
                             value["requests"]
                         ));
                     }
+                    if let Some(c) = value.get("collection") {
+                        self.log(format!(
+                            "集約: コピー {} / 集約済み {} / 問題 {} · F4で開く",
+                            c["copied"],
+                            c["existing"],
+                            c["problems"].as_array().map_or(0, Vec::len)
+                        ));
+                    }
                     self.last = Some(value);
                     finished = true;
                 }
@@ -784,12 +843,16 @@ impl App {
         if self.modal != Modal::None {
             match key.code {
                 KeyCode::Esc => self.modal = Modal::None,
-                KeyCode::Down | KeyCode::PageDown if self.modal == Modal::Result => {
+                KeyCode::Down | KeyCode::PageDown
+                    if matches!(self.modal, Modal::Result | Modal::Collection) =>
+                {
                     self.modal_scroll = self
                         .modal_scroll
                         .saturating_add(if key.code == KeyCode::Down { 1 } else { 5 })
                 }
-                KeyCode::Up | KeyCode::PageUp if self.modal == Modal::Result => {
+                KeyCode::Up | KeyCode::PageUp
+                    if matches!(self.modal, Modal::Result | Modal::Collection) =>
+                {
                     self.modal_scroll = self
                         .modal_scroll
                         .saturating_sub(if key.code == KeyCode::Up { 1 } else { 5 })
@@ -797,6 +860,18 @@ impl App {
                 KeyCode::Enter if self.modal == Modal::Confirm => {
                     self.modal = Modal::None;
                     self.start("fetch");
+                }
+                KeyCode::Enter if self.modal == Modal::Collection && self.worker.is_none() => {
+                    self.modal = Modal::None;
+                    self.start("collect");
+                }
+                KeyCode::Char('i' | 'I') if self.modal == Modal::Collection => {
+                    self.modal = Modal::None;
+                    self.open_collection("image")
+                }
+                KeyCode::Char('n' | 'N') if self.modal == Modal::Collection => {
+                    self.modal = Modal::None;
+                    self.open_collection("novel")
                 }
                 KeyCode::Enter if self.modal == Modal::Update && self.worker.is_none() => {
                     self.show_update_command = true;
@@ -814,6 +889,24 @@ impl App {
             self.modal = Modal::Result;
             self.modal_scroll = 0;
             return false;
+        }
+        if key.code == KeyCode::F(4) {
+            self.modal = Modal::Collection;
+            self.modal_scroll = 0;
+            return false;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            match key.code {
+                KeyCode::Char('i') => {
+                    self.open_collection("image");
+                    return false;
+                }
+                KeyCode::Char('n') => {
+                    self.open_collection("novel");
+                    return false;
+                }
+                _ => {}
+            }
         }
         if key.code == KeyCode::F(8) {
             self.check_update();
@@ -950,6 +1043,16 @@ impl App {
                 self.open_folder(true);
                 return;
             }
+            if let Some((image, novel)) = collection_buttons(view.footer) {
+                if image.contains(point) {
+                    self.open_collection("image");
+                    return;
+                }
+                if novel.contains(point) {
+                    self.open_collection("novel");
+                    return;
+                }
+            }
             let rows = view.queue.inner(ratatui::layout::Margin::new(1, 1));
             if rows.contains(point) && event.row > rows.y {
                 let visible = rows.height.saturating_sub(1) as usize;
@@ -1082,6 +1185,19 @@ fn buttons(footer: Rect) -> (Rect, Rect) {
         Rect::new(footer.x, y, root_width, 1),
         Rect::new(footer.x + root_width + 1, y, work_width, 1),
     )
+}
+fn collection_buttons(footer: Rect) -> Option<(Rect, Rect)> {
+    let (_, work) = buttons(footer);
+    let x = work.right() + 1;
+    let image_width = UnicodeWidthStr::width("[画像 Alt+I]") as u16;
+    let novel_width = UnicodeWidthStr::width("[小説 Alt+N]") as u16;
+    if x + image_width + 1 + novel_width > footer.right() {
+        return None;
+    }
+    Some((
+        Rect::new(x, work.y, image_width, 1),
+        Rect::new(x + image_width + 1, work.y, novel_width, 1),
+    ))
 }
 fn update_controls(header: Rect) -> Option<(Rect, Rect, Rect)> {
     if header.height == 0 {
@@ -1369,6 +1485,16 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         Paragraph::new(work_label).style(Style::default().fg(if can_open { CYAN } else { MUTED })),
         work,
     );
+    if let Some((image, novel)) = collection_buttons(view.footer) {
+        frame.render_widget(
+            Paragraph::new("[画像 Alt+I]").style(Style::default().fg(CYAN)),
+            image,
+        );
+        frame.render_widget(
+            Paragraph::new("[小説 Alt+N]").style(Style::default().fg(CYAN)),
+            novel,
+        );
+    }
     frame.render_widget(
         Gauge::default()
             .ratio(ratio)
@@ -1388,7 +1514,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
     );
     frame.render_widget(
         Paragraph::new(
-            "Tab 設定移動   F2 デモ   F3 結果   Ctrl+S 保存   F1 ヘルプ   Esc 停止/終了",
+            "Tab 移動   F2 デモ   F3 結果   F4 集約   Ctrl+S 保存   F1 ヘルプ   Esc 終了",
         )
         .style(Style::default().fg(MUTED)),
         foot[2],
@@ -1401,6 +1527,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             Modal::Help => 22,
             Modal::Result => 24,
             Modal::Update => 19,
+            Modal::Collection => 20,
             _ => 12,
         });
         let popup = Rect::new(
@@ -1411,7 +1538,9 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         );
         frame.render_widget(Clear, popup);
         let text = if app.modal == Modal::Help {
-            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜4\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
+            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜4\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
+        } else if app.modal == Modal::Collection {
+            app.collection_details()
         } else if app.modal == Modal::Update {
             app.update_details()
         } else if app.modal == Modal::Result {
@@ -1423,7 +1552,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             Paragraph::new(text)
                 .wrap(Wrap { trim: false })
                 .scroll((
-                    if app.modal == Modal::Result {
+                    if matches!(app.modal, Modal::Result | Modal::Collection) {
                         app.modal_scroll
                     } else {
                         0
@@ -1434,6 +1563,8 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
                 .block(panel(
                     if app.modal == Modal::Help {
                         "HELP"
+                    } else if app.modal == Modal::Collection {
+                        "画像・小説の集約"
                     } else if app.modal == Modal::Update {
                         "アップデート"
                     } else if app.modal == Modal::Result {
@@ -1515,6 +1646,37 @@ impl Drop for App {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn collection_dialog_backfills_missing_text_offline_and_keeps_work_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("集約テスト");
+        let mut app = App::default();
+        app.demo = true;
+        app.urls = Editor::new("user:9001");
+        app.out = Editor::new(out.to_str().unwrap());
+        app.start("fetch");
+        finish(&mut app);
+        assert_eq!(app.rows.len(), 4);
+        let novel = out.join("works/novel/novel_1004.txt");
+        assert!(novel.is_file());
+        std::fs::remove_file(&novel).unwrap();
+        app.key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+        assert!(app.modal == Modal::Collection);
+        assert!(app
+            .collection_details()
+            .contains(&out.join("works/novel").display().to_string()));
+        for (w, h) in [(40, 18), (80, 24), (120, 36)] {
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| draw(f, &app, false)).unwrap();
+        }
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        finish(&mut app);
+        assert!(novel.is_file());
+        assert_eq!(app.last.as_ref().unwrap()["collection"]["copied"], 1);
+        assert_eq!(app.last.as_ref().unwrap()["collection"]["existing"], 5);
+        assert_eq!(app.rows.len(), 4);
+        assert!(app.summary().contains("ファイル集約"));
+    }
     #[test]
     fn asynchronous_update_notification_is_visible_without_blocking_input() {
         let mut app = App::default();

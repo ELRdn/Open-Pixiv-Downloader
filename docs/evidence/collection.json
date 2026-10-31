@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-31",
+  "version": "0.2.0-alpha.4",
+  "platform": "x86_64-unknown-linux-gnu",
+  "rust_tests": {"passed": 39, "failed": 0},
+  "validation": {
+    "synthetic_fixture": "illustration, two-page manga, ugoira ZIP and timing, novel plain text",
+    "collected_files": 6,
+    "collected_bytes": "Equal to their source files",
+    "independent_copy": "Editing a collected image does not alter the archived image or its verification",
+    "idempotent": "Repeated collection reuses identical files",
+    "missing_copy": "Recreated without download requests",
+    "conflict": "Edited copy retained; collection reports a problem; original archive remains valid",
+    "invalid_source": "No output published",
+    "cancellation_during_copy": "Temporary file discarded",
+    "symlink_destination": "Refused on Unix; outside directory unchanged",
+    "legacy_archive": "Python-created archive collected by native Rust CLI without network",
+    "plan": "Does not create collection directories"
+  },
+  "terminal_smoke": {
+    "backend": "real Linux PTY 120x36, automatic update check disabled",
+    "automatic_collection": "passed",
+    "F4_offline_backfill": "passed",
+    "Alt_I_Alt_N": "Correct directory passed to a stub file manager",
+    "image_button_click": "passed",
+    "work_rows_after_verify": "preserved",
+    "exit": "clean"
+  },
+  "not_verified": ["Windows native display and Explorer invocation"]
+}
