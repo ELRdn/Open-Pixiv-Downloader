@@ -27,6 +27,7 @@ enum Failure {
     Corrupt,
     Stop(String),
     Unavailable(String),
+    Missing(u16),
     Retryable(String),
     Io(std::io::ErrorKind),
     Other,
@@ -37,6 +38,7 @@ impl Failure {
             Error::Budget => Self::Budget,
             Error::Stop(message) => Self::Stop(message.clone()),
             Error::Unavailable(message) => Self::Unavailable(message.clone()),
+            Error::Missing { status } => Self::Missing(*status),
             Error::Retryable(message) => Self::Retryable(message.clone()),
             Error::Io(error) => Self::Io(error.kind()),
             _ => Self::Other,
@@ -48,6 +50,7 @@ impl Failure {
             Self::Corrupt => invalid("Shared media cache checksum changed"),
             Self::Stop(message) => Error::Stop(message.clone()),
             Self::Unavailable(message) => Error::Unavailable(message.clone()),
+            Self::Missing(status) => Error::Missing { status: *status },
             Self::Retryable(message) => Error::Retryable(message.clone()),
             Self::Io(kind) => std::io::Error::new(*kind, "Shared media cache I/O failed").into(),
             Self::Other => invalid("Shared media acquisition failed; retry repair later"),
@@ -450,6 +453,7 @@ mod tests {
         stop: AtomicBool,
         fail: AtomicBool,
         io_fail: AtomicBool,
+        missing: AtomicUsize,
         panic: AtomicBool,
         limit: usize,
         delay: Duration,
@@ -462,6 +466,7 @@ mod tests {
                 stop: false.into(),
                 fail: false.into(),
                 io_fail: false.into(),
+                missing: 0.into(),
                 panic: false.into(),
                 limit: usize::MAX,
                 delay: Duration::from_millis(30),
@@ -480,6 +485,12 @@ mod tests {
             self.count.fetch_add(1, Ordering::SeqCst);
             thread::sleep(self.delay);
             assert!(!self.panic.load(Ordering::SeqCst), "synthetic media panic");
+            let missing = self.missing.load(Ordering::SeqCst);
+            if missing > 0 {
+                return Err(Error::Missing {
+                    status: missing as u16,
+                });
+            }
             if self.io_fail.load(Ordering::SeqCst) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -653,6 +664,23 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(inner.requests(), 2);
+        }
+    }
+    #[test]
+    fn missing_media_status_survives_singleflight_for_all_consumers() {
+        for status in [404, 410] {
+            let directory = tempfile::tempdir().unwrap();
+            let inner = Arc::new(Counting::new());
+            inner.missing.store(status as usize, Ordering::SeqCst);
+            let cache = Arc::new(SharedMedia::new(inner.clone(), 1024).unwrap());
+            for result in run_four(cache.clone(), directory.path()) {
+                assert!(
+                    matches!(result, Err(Error::Missing { status: observed }) if observed == status)
+                );
+            }
+            assert_eq!(inner.requests(), 1);
+            assert_eq!(cache.metrics()["shared_media"]["reserved_bytes"], 0);
+            assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
         }
     }
     #[test]

@@ -84,6 +84,28 @@ fn eligible(body: &Value) -> bool {
         && (body["restrict"].is_null() || body["restrict"] == 0 || body["restrict"] == "0")
         && (body["isUnlisted"].is_null() || body["isUnlisted"] == false)
 }
+fn snapshot_identity(body: &Value) -> String {
+    let keys = [
+        "id",
+        "userId",
+        "content",
+        "coverUrl",
+        "textEmbeddedImages",
+        "illustType",
+        "pageCount",
+        "urls",
+        "createDate",
+        "uploadDate",
+    ];
+    let value: serde_json::Map<String, Value> = keys
+        .iter()
+        .map(|key| ((*key).into(), body[*key].clone()))
+        .collect();
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&value).expect("JSON values serialize"))
+    )
+}
 fn str_at<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key]
         .as_str()
@@ -181,6 +203,7 @@ pub struct Archive {
     pub root: PathBuf,
     db: Mutex<Connection>,
     lock: PathBuf,
+    _guard: File,
 }
 type StateRow = (Target, String, String, Option<String>);
 impl Archive {
@@ -190,17 +213,50 @@ impl Archive {
         }
         fs::create_dir_all(root)?;
         let root = root.canonicalize()?;
+        // The OS lock survives as a file but releases automatically on process death.
+        // Keep a separate create-new sentinel so older Python/Rust binaries also refuse
+        // concurrent writes; only a V2 sentinel can be recovered automatically.
+        let guard = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(safe_path(&root, ".archive.lock")?)?;
+        guard.try_lock().map_err(|error| {
+            invalid(&format!(
+                "Archive is locked or filesystem locking is unavailable: {error}"
+            ))
+        })?;
         let lock = safe_path(&root, ".run.lock")?;
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&lock).map_err(|e|
-            if e.kind() == std::io::ErrorKind::AlreadyExists { invalid("Archive is locked. Confirm no process is running before removing .run.lock") } else { Error::Io(e) })?;
+        const MARKER: &str = "OpenPixivDownloader archive lock v2\n";
+        if lock.exists() {
+            let mut marker = String::new();
+            File::open(&lock)?.take(128).read_to_string(&mut marker)?;
+            if !marker.starts_with(MARKER) {
+                return Err(invalid("Legacy archive lock found. Confirm all older downloader processes are closed before removing .run.lock; automatic legacy recovery is unsafe"));
+            }
+            // Holding the persistent OS guard proves no V2 owner is still active.
+            fs::remove_file(&lock)?;
+        }
+        let mut sentinel = tempfile::NamedTempFile::new_in(&root)?;
+        writeln!(sentinel, "{MARKER}{}", std::process::id())?;
+        sentinel.as_file().sync_all()?;
+        let sentinel = sentinel.persist_noclobber(&lock).map_err(|error| {
+            if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                invalid("Archive was locked by another downloader before initialization completed")
+            } else {
+                Error::Io(error.error)
+            }
+        })?;
+        drop(sentinel);
         let result = (|| {
-            writeln!(file, "{}", std::process::id())?;
             let db = Connection::open(safe_path(&root, "state.sqlite3")?)?;
             db.execute_batch("CREATE TABLE IF NOT EXISTS works(kind TEXT NOT NULL,id TEXT NOT NULL,status TEXT NOT NULL,updated_at TEXT NOT NULL,reason TEXT,PRIMARY KEY(kind,id));")?;
             Ok(Self {
                 root,
                 db: Mutex::new(db),
                 lock: lock.clone(),
+                _guard: guard,
             })
         })();
         if result.is_err() {
@@ -247,10 +303,13 @@ impl Archive {
         let Some(manifest) = self.manifest(target) else {
             return vec!["missing or invalid manifest".into()];
         };
+        if manifest["key"] != target.key() {
+            return vec!["manifest identity does not match work".into()];
+        }
         let Some(files) = manifest["files"].as_array().filter(|v| !v.is_empty()) else {
             return vec!["missing or invalid manifest files".into()];
         };
-        files
+        let mut errors: Vec<String> = files
             .iter()
             .filter_map(|entry| {
                 let ok = entry["path"]
@@ -269,7 +328,40 @@ impl Archive {
                     ))
                 }
             })
-            .collect()
+            .collect();
+        if manifest["status"] == "complete" {
+            let mut required = vec!["raw.json", "metadata.json"];
+            if target.kind == "novel" {
+                required.extend(["source.txt", "plain.txt", "index.html"]);
+            } else if let Some(body) = self.cached_json(target, "raw.json") {
+                if body["illustType"] == 2 {
+                    required.extend(["frames.json", "frames.zip"]);
+                } else {
+                    required.push("pages.json");
+                }
+            }
+            for name in required {
+                if !files.iter().any(|entry| entry["path"] == name) {
+                    errors.push(format!("required file is not declared: {name}"));
+                }
+            }
+            if let Some(resources) = manifest["resources"].as_array() {
+                for resource in resources {
+                    if resource["status"] != "complete" {
+                        errors.push("complete manifest contains an unfinished material".into());
+                    }
+                    if !resource["path"]
+                        .as_str()
+                        .is_some_and(|path| files.iter().any(|entry| entry["path"] == path))
+                    {
+                        errors.push(
+                            "complete manifest does not declare an expected material file".into(),
+                        );
+                    }
+                }
+            }
+        }
+        errors
     }
     pub fn complete(&self, target: &Target) -> Result<bool> {
         Ok(self.status(target)?.as_deref() == Some("complete")
@@ -278,111 +370,349 @@ impl Archive {
                 .is_some_and(|m| m["status"] == "complete")
             && self.check(target).is_empty())
     }
+    /// Compatibility helper; the pipeline calls prepare/finish independently.
+    #[allow(dead_code)]
     pub fn save(&self, target: &Target, client: &dyn Transport) -> Result<String> {
+        let status = self.prepare(target, client)?;
+        if status != "assets_pending" {
+            return Ok(status);
+        }
+        self.finish(target, client)
+    }
+
+    /// Commit usable local text before any cover or inserted-image request.
+    pub fn prepare(&self, target: &Target, client: &dyn Transport) -> Result<String> {
         if self.complete(target)? {
             return Ok("already_complete".into());
         }
-        self.state(target, "in_progress", None)?;
-        match self.save_body(target, client) {
+        self.stage_result(target, client, self.prepare_body(target, client))
+    }
+
+    /// Complete a previously committed snapshot without fetching its detail again.
+    pub fn finish(&self, target: &Target, client: &dyn Transport) -> Result<String> {
+        self.stage_result(target, client, self.finish_body(target, client))
+    }
+
+    fn stage_result(
+        &self,
+        target: &Target,
+        client: &dyn Transport,
+        result: Result<String>,
+    ) -> Result<String> {
+        match result {
             Ok(status) => {
-                self.state(target, &status, None)?;
+                let stored = if status == "assets_pending" {
+                    "partial"
+                } else {
+                    &status
+                };
+                self.state(target, stored, None)?;
                 Ok(status)
             }
-            Err(e @ Error::Stop(_)) => {
+            Err(error @ Error::Budget) => {
+                // Budget only closes admission. Do not cancel other in-flight work.
+                self.state(target, "paused", Some(&error.to_string()))?;
+                Err(error)
+            }
+            Err(error @ Error::Stop(_)) => {
                 client.cancel();
-                self.state(target, "paused", Some(&e.to_string()))?;
-                Err(e)
+                self.state(target, "paused", Some(&error.to_string()))?;
+                Err(error)
             }
-            Err(e @ Error::Unavailable(_)) => {
-                self.state(target, "unavailable", Some(&e.to_string()))?;
-                Ok("unavailable".into())
+            Err(error @ (Error::Unavailable(_) | Error::Missing { .. })) => {
+                let status = if self.manifest(target).is_some() {
+                    "partial"
+                } else {
+                    "unavailable"
+                };
+                self.state(target, status, Some(&error.to_string()))?;
+                Ok(status.into())
             }
-            Err(e) => {
-                self.state(target, "failed", Some(&e.to_string()))?;
+            Err(error @ (Error::Io(_) | Error::Sql(_))) => {
+                // Preserve the primary disk/DB failure even if recording it also fails.
+                let _ = self.state(target, "failed", Some(&error.to_string()));
+                Err(error)
+            }
+            Err(error) => {
+                self.state(target, "failed", Some(&error.to_string()))?;
                 Ok("failed".into())
             }
         }
     }
-    fn save_body(&self, target: &Target, client: &dyn Transport) -> Result<String> {
+
+    fn cached_json(&self, target: &Target, name: &str) -> Option<Value> {
+        let manifest = self.manifest(target)?;
+        if manifest["key"] != target.key() {
+            return None;
+        }
+        let entry = manifest["files"]
+            .as_array()?
+            .iter()
+            .find(|e| e["path"] == name)?;
+        let path = self.path(target, name).ok()?;
+        let (hash, bytes) = fingerprint(&path).ok()?;
+        if entry["sha256"] != hash || entry["bytes"] != bytes {
+            return None;
+        }
+        serde_json::from_slice(&fs::read(path).ok()?).ok()
+    }
+
+    /// Explicit repair of a previous typed 404/410 may recheck source metadata once.
+    /// Changed references are never spliced into the saved snapshot.
+    fn refresh_stale_snapshot(
+        &self,
+        target: &Target,
+        client: &dyn Transport,
+        body: &Value,
+    ) -> Result<()> {
+        let Some(manifest) = self.manifest(target) else {
+            return Ok(());
+        };
+        let stale: Vec<_> = manifest["resources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|resource| {
+                resource["status"] != "complete"
+                    && matches!(resource["last_http_status"].as_u64(), Some(404 | 410))
+            })
+            .collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
         let endpoint = if target.kind == "art" {
             "illust"
         } else {
             "novel"
         };
-        let body = client.api(&format!("/ajax/{endpoint}/{}", target.id), &[])?;
+        let fresh = client.api(&format!("/ajax/{endpoint}/{}", target.id), &[])?;
+        if fresh["id"] != target.id
+            || !eligible(&fresh)
+            || snapshot_identity(body) != snapshot_identity(&fresh)
+        {
+            return Err(invalid("update_needed: stale material metadata now describes a different or inaccessible snapshot; original files were preserved"));
+        }
+        if target.kind == "art" {
+            let motion = body["illustType"] == 2;
+            let name = if motion { "frames.json" } else { "pages.json" };
+            let path = if motion {
+                format!("/ajax/illust/{}/ugoira_meta", target.id)
+            } else {
+                format!("/ajax/illust/{}/pages", target.id)
+            };
+            let saved = self.cached_json(target, name).ok_or_else(|| {
+                invalid("update_needed: saved material metadata cannot prove snapshot consistency")
+            })?;
+            let fresh = client.api(&path, &[])?;
+            if fresh != saved {
+                return Err(invalid("update_needed: stale artwork material references changed; original files were preserved"));
+            }
+        } else {
+            let mut seen = HashSet::new();
+            for resource in stale {
+                let Some(reference) = resource["reference"]
+                    .as_str()
+                    .and_then(|value| value.strip_prefix("pixivimage:"))
+                else {
+                    continue;
+                };
+                if !seen.insert(reference) {
+                    continue;
+                }
+                let relation = client.api(
+                    &format!("/ajax/novel/{}/insert_illusts", target.id),
+                    &[("id[]", reference.into())],
+                )?;
+                let item = &relation[reference];
+                if item["visible"] != true
+                    || !eligible(&item["illust"])
+                    || item["illust"]["images"]["original"] != resource["source_url"]
+                {
+                    return Err(invalid("update_needed: stale inserted-image relation changed; original files were preserved"));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn prepare_body(&self, target: &Target, client: &dyn Transport) -> Result<String> {
+        let body = match self.cached_json(target, "raw.json") {
+            Some(body) => {
+                self.refresh_stale_snapshot(target, client, &body)?;
+                body
+            }
+            None => {
+                if self.manifest(target).is_some_and(|manifest| {
+                    manifest["key"] == target.key()
+                        && manifest["snapshot_identity"].as_str().is_none()
+                        && manifest["files"].as_array().is_some_and(|files| {
+                            files.iter().any(|entry| entry["path"] == "raw.json")
+                        })
+                }) {
+                    return Err(invalid("update_needed: damaged legacy raw data cannot prove the original snapshot identity; original files were preserved"));
+                }
+                let endpoint = if target.kind == "art" {
+                    "illust"
+                } else {
+                    "novel"
+                };
+                let body = client.api(&format!("/ajax/{endpoint}/{}", target.id), &[])?;
+                if let Some(manifest) = self.manifest(target) {
+                    if let Some(identity) = manifest["snapshot_identity"].as_str() {
+                        if identity != snapshot_identity(&body) {
+                            return Err(invalid("update_needed: remote payload differs from saved snapshot; original files were preserved"));
+                        }
+                    } else if let Some(metadata) = self.cached_json(target, "metadata.json") {
+                        if metadata["updated_at"] != body["uploadDate"] {
+                            return Err(invalid("update_needed: remote modification date differs from saved snapshot; original files were preserved"));
+                        }
+                    }
+                }
+                // A repaired raw file must still describe the saved source snapshot.
+                // Never silently mix a newer remote novel body with old material.
+                if target.kind == "novel" {
+                    if let Some(manifest) = self.manifest(target) {
+                        if let Some(entry) = manifest["files"].as_array().and_then(|files| {
+                            files.iter().find(|entry| entry["path"] == "source.txt")
+                        }) {
+                            if let Some(content) = body["content"].as_str() {
+                                let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+                                if entry["sha256"] != hash || entry["bytes"] != content.len() as u64
+                                {
+                                    return Err(invalid("update_needed: remote novel differs from saved snapshot; original files were preserved"));
+                                }
+                            }
+                        }
+                    }
+                }
+                body
+            }
+        };
         if !eligible(&body) {
             return Ok("skipped".into());
         }
         if body["id"] != target.id {
             return Err(invalid("Returned work ID does not match request"));
         }
-        let art_type = body["illustType"].as_u64();
         let kind = if target.kind == "novel" {
             "novel"
         } else {
-            match art_type {
+            match body["illustType"].as_u64() {
                 Some(0) => "illustration",
                 Some(1) => "manga",
                 Some(2) => "ugoira",
                 _ => return Err(invalid("Unknown artwork type")),
             }
         };
-        let metadata = json!({"schema_version":1,"id":target.id,"kind":kind,"title":body["title"],"author_id":body["userId"],"author_name":body["userName"],"source_url":target.url(),"created_at":body["createDate"],"updated_at":body["uploadDate"],"tags":body["tags"],"series":body["seriesNavData"],"archived_at":now(),"source_visibility":"public_general","rights":{"copyright_holder":"original author","license":"unknown","ai_training_permission":"unknown","redistribution_permission":"unknown"}});
-        let mut writer = WorkWriter {
-            archive: self,
-            target,
-            client,
-            old: self.manifest(target),
-            files: vec![],
-            omissions: vec![],
-        };
+        let mut writer = WorkWriter::new(self, target, client);
         writer.json("raw.json", &body)?;
-        writer.json("metadata.json", &metadata)?;
+        if self.cached_json(target, "metadata.json").is_none() {
+            let metadata = json!({"schema_version":1,"id":target.id,"kind":kind,"title":body["title"],"author_id":body["userId"],"author_name":body["userName"],"source_url":target.url(),"created_at":body["createDate"],"updated_at":body["uploadDate"],"tags":body["tags"],"series":body["seriesNavData"],"archived_at":now(),"source_visibility":"public_general","rights":{"copyright_holder":"original author","license":"unknown","ai_training_permission":"unknown","redistribution_permission":"unknown"}});
+            writer.json("metadata.json", &metadata)?;
+        }
+        if target.kind == "novel" {
+            let content = str_at(&body, "content")?;
+            if content.is_empty() && body["textCount"].as_u64().unwrap_or(0) > 0 {
+                return Err(invalid("Novel body is empty despite declared text count"));
+            }
+            if !body["textEmbeddedImages"].is_null() && !body["textEmbeddedImages"].is_object() {
+                return Err(invalid("Novel embedded-image schema changed"));
+            }
+            writer.write("source.txt", content.as_bytes())?;
+            writer.write("plain.txt", novel::plain_text(content).as_bytes())?;
+            let images = writer.healthy_novel_images(content);
+            writer.write(
+                "index.html",
+                novel::render(
+                    content,
+                    body["title"].as_str().unwrap_or(""),
+                    body["userName"].as_str().unwrap_or(""),
+                    &images,
+                )
+                .as_bytes(),
+            )?;
+        }
+        writer.checkpoint("partial", true)?;
+        if !self.check(target).is_empty() {
+            return Err(invalid("Prepared snapshot checksum verification failed"));
+        }
+        Ok("assets_pending".into())
+    }
+
+    fn finish_body(&self, target: &Target, client: &dyn Transport) -> Result<String> {
+        let body = self.cached_json(target, "raw.json").ok_or_else(|| {
+            invalid("Prepared raw snapshot is missing or changed; prepare the work again")
+        })?;
+        if body["id"] != target.id || !eligible(&body) {
+            return Err(invalid("Prepared snapshot identity or visibility changed"));
+        }
+        let art_type = body["illustType"].as_u64();
+        let mut writer = WorkWriter::new(self, target, client);
+        if writer.local_json("metadata.json").is_none() {
+            return Err(invalid(
+                "Prepared metadata is missing or changed; prepare the work again",
+            ));
+        }
+        if target.kind == "novel" {
+            let content = str_at(&body, "content")?;
+            writer.write("source.txt", content.as_bytes())?;
+            writer.write("plain.txt", novel::plain_text(content).as_bytes())?;
+        }
         if target.kind == "art" && art_type != Some(2) {
-            let pages = client.api(&format!("/ajax/illust/{}/pages", target.id), &[])?;
-            let list = pages
-                .as_array()
-                .ok_or_else(|| invalid("Image page schema changed"))?;
+            let pages = writer.api_json(
+                "pages.json",
+                &format!("/ajax/illust/{}/pages", target.id),
+                &[],
+            )?;
+            let Some(list) = pages.as_array() else {
+                writer.invalidate("pages.json", "Image page schema changed")?;
+                return Err(invalid("Image page schema changed"));
+            };
             if list.is_empty() || body["pageCount"].as_u64() != Some(list.len() as u64) {
+                writer.invalidate("pages.json", "Image-page count does not match metadata")?;
                 return Err(invalid("Image-page count does not match metadata"));
             }
-            writer.json("pages.json", &pages)?;
-            for (i, page) in list.iter().enumerate() {
-                let url = str_at(&page["urls"], "original")?;
-                writer.asset(url, &format!("images/{i:04}{}", extension(url)?), false)?;
+            let validated = list
+                .iter()
+                .map(|page| {
+                    let url = str_at(&page["urls"], "original")?;
+                    crate::transport::validate_url(url, true)?;
+                    Ok((url, extension(url)?))
+                })
+                .collect::<Result<Vec<_>>>();
+            let validated = match validated {
+                Ok(pages) => pages,
+                Err(error) => {
+                    writer.invalidate("pages.json", &error.to_string())?;
+                    return Err(error);
+                }
+            };
+            for (i, (url, suffix)) in validated.iter().enumerate() {
+                writer.asset(url, &format!("images/{i:04}{suffix}"), false)?;
             }
         } else if target.kind == "art" {
-            let motion = client.api(&format!("/ajax/illust/{}/ugoira_meta", target.id), &[])?;
-            let frames = motion["frames"]
-                .as_array()
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| invalid("Missing ugoira frame timing"))?;
-            let mut names = HashSet::new();
-            for frame in frames {
-                let name = str_at(frame, "file")?;
-                let delay = frame["delay"]
-                    .as_f64()
-                    .ok_or_else(|| invalid("Invalid ugoira delay"))?;
-                if name.is_empty()
-                    || name.contains(['/', '\\', ':'])
-                    || name.chars().any(char::is_control)
-                    || !delay.is_finite()
-                    || !(0.0 < delay && delay <= 3600000.0)
-                    || !names.insert(name.to_owned())
-                {
-                    return Err(invalid("Invalid ugoira frame metadata"));
+            let motion = writer.api_json(
+                "frames.json",
+                &format!("/ajax/illust/{}/ugoira_meta", target.id),
+                &[],
+            )?;
+            let names = match frame_names(&motion) {
+                Ok(names) => names,
+                Err(error) => {
+                    writer.invalidate("frames.json", &error.to_string())?;
+                    return Err(error);
                 }
-            }
+            };
             writer.asset(str_at(&motion, "originalSrc")?, "frames.zip", false)?;
-            validate_frames(&self.path(target, "frames.zip")?, &names)?;
+            if let Err(error) = validate_frames(&self.path(target, "frames.zip")?, &names) {
+                writer.invalidate("frames.zip", &error.to_string())?;
+                return Err(error);
+            }
             writer.json("frames.json", &motion)?;
         } else {
             let content = str_at(&body, "content")?;
             if content.is_empty() && body["textCount"].as_u64().unwrap_or(0) > 0 {
                 return Err(invalid("Novel body is empty despite declared text count"));
             }
-            writer.write("source.txt", content.as_bytes())?;
-            writer.write("plain.txt", novel::plain_text(content).as_bytes())?;
             if let Some(cover) = body["coverUrl"].as_str().filter(|s| !s.is_empty()) {
                 match extension(cover) {
                     Ok(ext) => {
@@ -397,6 +727,10 @@ impl Archive {
             }
             for key in novel::image_refs(content) {
                 let (tag, image_id) = key.split_once(':').unwrap();
+                if let Some(relative) = writer.healthy_novel_images(content).get(&key).cloned() {
+                    images.insert(key, relative);
+                    continue;
+                }
                 let url = if tag == "uploadedimage" {
                     let item = &body["textEmbeddedImages"][image_id];
                     if !item.is_object()
@@ -409,10 +743,7 @@ impl Archive {
                     }
                     item["urls"]["original"].as_str().map(str::to_owned)
                 } else {
-                    let response = match client.api(
-                        &format!("/ajax/novel/{}/insert_illusts", target.id),
-                        &[("id[]", image_id.into())],
-                    ) {
+                    let response = match writer.relation(image_id) {
                         Ok(v) => v,
                         Err(Error::Unavailable(_)) => {
                             writer.omit(&key, "Insertion relation unavailable");
@@ -461,11 +792,7 @@ impl Archive {
         } else {
             "partial"
         };
-        let manifest = json!({"schema_version":1,"tool_version":env!("CARGO_PKG_VERSION"),"key":target.key(),"source_url":target.url(),"archived_at":now(),"status":status,"completeness_scope":"supported work payload; excludes comments, likes and account data","files":writer.files,"omissions":writer.omissions});
-        atomic(
-            &self.path(target, "manifest.json")?,
-            &serde_json::to_vec_pretty(&manifest)?,
-        )?;
+        writer.checkpoint(status, false)?;
         if !self.check(target).is_empty() {
             return Err(invalid("Post-write checksum verification failed"));
         }
@@ -522,7 +849,11 @@ impl Archive {
         collection::prepare(&self.root)?;
         let mut report = collection::Report::default();
         for (target, status, _, _) in self.rows()? {
-            if !matches!(status.as_str(), "complete" | "partial") {
+            if !matches!(status.as_str(), "complete" | "partial")
+                && !self.manifest(&target).is_some_and(|manifest| {
+                    matches!(manifest["status"].as_str(), Some("complete" | "partial"))
+                })
+            {
                 continue;
             }
             report.merge(self.collect_work(&target, cancel));
@@ -538,7 +869,11 @@ impl Archive {
         let mut valid = 0;
         let mut problems = Vec::new();
         for (t, status, _, _) in self.rows()? {
-            if !matches!(status.as_str(), "complete" | "partial") {
+            if !matches!(status.as_str(), "complete" | "partial")
+                && !self.manifest(&t).is_some_and(|manifest| {
+                    matches!(manifest["status"].as_str(), Some("complete" | "partial"))
+                })
+            {
                 continue;
             }
             checked += 1;
@@ -621,57 +956,356 @@ struct WorkWriter<'a> {
     old: Option<Value>,
     files: Vec<Value>,
     omissions: Vec<Value>,
+    relations: serde_json::Map<String, Value>,
+    http_statuses: HashMap<String, u16>,
 }
-impl WorkWriter<'_> {
+impl<'a> WorkWriter<'a> {
+    fn new(archive: &'a Archive, target: &'a Target, client: &'a dyn Transport) -> Self {
+        let old = archive
+            .manifest(target)
+            .filter(|m| m["key"] == target.key());
+        let files = old
+            .as_ref()
+            .and_then(|m| m["files"].as_array())
+            .map(|files| {
+                files
+                    .iter()
+                    .filter(|entry| {
+                        entry["path"]
+                            .as_str()
+                            .and_then(|name| archive.path(target, name).ok())
+                            .and_then(|path| fingerprint(&path).ok())
+                            .is_some_and(|(hash, bytes)| {
+                                entry["sha256"] == hash && entry["bytes"] == bytes
+                            })
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let relations = old
+            .as_ref()
+            .and_then(|m| m["relations"].as_object())
+            .cloned()
+            .unwrap_or_default();
+        let http_statuses = old
+            .as_ref()
+            .and_then(|manifest| manifest["resources"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|resource| {
+                let path = resource["path"].as_str()?;
+                let status = resource["last_http_status"].as_u64()?;
+                matches!(status, 404 | 410).then(|| (path.to_owned(), status as u16))
+            })
+            .collect();
+        Self {
+            archive,
+            target,
+            client,
+            old,
+            files,
+            omissions: Vec::new(),
+            relations,
+            http_statuses,
+        }
+    }
     fn record(&mut self, relative: &str, url: Option<&str>) -> Result<()> {
         let (hash, bytes) = fingerprint(&self.archive.path(self.target, relative)?)?;
         let mut entry = json!({"path":relative,"sha256":hash,"bytes":bytes});
         if let Some(url) = url {
             entry["source_url"] = json!(url);
         }
+        self.files.retain(|entry| entry["path"] != relative);
         self.files.push(entry);
         Ok(())
     }
     fn write(&mut self, relative: &str, data: &[u8]) -> Result<()> {
+        let hash = format!("{:x}", Sha256::digest(data));
+        if self.files.iter().any(|entry| {
+            entry["path"] == relative
+                && entry["sha256"] == hash
+                && entry["bytes"] == data.len() as u64
+        }) {
+            return Ok(());
+        }
         atomic(&self.archive.path(self.target, relative)?, data)?;
         self.record(relative, None)
     }
     fn json(&mut self, relative: &str, value: &Value) -> Result<()> {
         self.write(relative, &serde_json::to_vec_pretty(value)?)
     }
+    fn local_json(&self, relative: &str) -> Option<Value> {
+        self.files.iter().find(|entry| entry["path"] == relative)?;
+        serde_json::from_slice(&fs::read(self.archive.path(self.target, relative).ok()?).ok()?).ok()
+    }
+    fn api_json(&mut self, relative: &str, path: &str, query: &[(&str, String)]) -> Result<Value> {
+        if let Some(value) = self.local_json(relative) {
+            return Ok(value);
+        }
+        let value = self.client.api(path, query)?;
+        self.json(relative, &value)?;
+        self.checkpoint("partial", true)?;
+        Ok(value)
+    }
+    fn relation(&mut self, image_id: &str) -> Result<Value> {
+        if let Some(entry) = self.relations.get(image_id) {
+            if let Some(value) = entry.get("value") {
+                let bytes = serde_json::to_vec(value)?;
+                if entry["sha256"] == format!("{:x}", Sha256::digest(&bytes)) {
+                    return Ok(value.clone());
+                }
+            }
+        }
+        let value = self.client.api(
+            &format!("/ajax/novel/{}/insert_illusts", self.target.id),
+            &[("id[]", image_id.into())],
+        )?;
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&value)?));
+        let item = &value[image_id];
+        let cacheable = item["visible"] == true
+            && eligible(&item["illust"])
+            && item["illust"]["images"]["original"]
+                .as_str()
+                .is_some_and(|url| {
+                    crate::transport::validate_url(url, true).is_ok() && extension(url).is_ok()
+                });
+        if cacheable {
+            self.relations
+                .insert(image_id.into(), json!({"value":value,"sha256":hash}));
+        } else {
+            self.relations.remove(image_id);
+        }
+        self.checkpoint("partial", true)?;
+        Ok(value)
+    }
     fn omit(&mut self, resource: &str, reason: &str) {
         self.omissions
             .push(json!({"resource":resource,"reason":reason}));
     }
+    fn invalidate(&mut self, relative: &str, reason: &str) -> Result<()> {
+        self.files.retain(|entry| entry["path"] != relative);
+        self.omit(relative, reason);
+        self.checkpoint("partial", false)
+    }
     fn asset(&mut self, url: &str, relative: &str, optional: bool) -> Result<bool> {
         let path = self.archive.path(self.target, relative)?;
+        // files contains only entries verified when this writer was created.
+        if self
+            .files
+            .iter()
+            .any(|entry| entry["path"] == relative && entry["source_url"] == url)
+        {
+            return Ok(true);
+        }
+        // Legacy/crash recovery may have an earlier valid entry outside files.
         let old = self
             .old
             .as_ref()
             .and_then(|m| m["files"].as_array())
-            .and_then(|f| {
-                f.iter()
-                    .find(|e| e["path"] == relative && e["source_url"] == url)
+            .and_then(|files| {
+                files
+                    .iter()
+                    .find(|entry| entry["path"] == relative && entry["source_url"] == url)
             });
         if old.is_some_and(|entry| {
-            fingerprint(&path).is_ok_and(|(h, b)| entry["sha256"] == h && entry["bytes"] == b)
+            fingerprint(&path)
+                .is_ok_and(|(hash, bytes)| entry["sha256"] == hash && entry["bytes"] == bytes)
         }) {
             self.record(relative, Some(url))?;
+            self.checkpoint("partial", true)?;
             return Ok(true);
         }
         match self.client.download(url, &path) {
             Ok(()) => {
+                self.http_statuses.remove(relative);
                 self.record(relative, Some(url))?;
+                self.checkpoint("partial", true)?;
                 Ok(true)
             }
-            Err(e @ Error::Stop(_)) => Err(e),
-            Err(e) if optional => {
-                self.omit(relative, &e.to_string());
+            Err(error @ (Error::Stop(_) | Error::Budget)) => {
+                self.omit(relative, &error.to_string());
+                self.checkpoint("partial", true)?;
+                Err(error)
+            }
+            Err(error @ Error::Missing { status }) => {
+                self.http_statuses.insert(relative.into(), status);
+                self.omit(relative, &error.to_string());
+                self.checkpoint("partial", false)?;
+                if optional {
+                    Ok(false)
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error @ (Error::Io(_) | Error::Sql(_))) => {
+                self.http_statuses.remove(relative);
+                self.omit(relative, &error.to_string());
+                let _ = self.checkpoint("partial", false);
+                Err(error)
+            }
+            Err(error) if optional => {
+                self.http_statuses.remove(relative);
+                self.omit(relative, &error.to_string());
+                self.checkpoint("partial", false)?;
                 Ok(false)
             }
-            Err(e) => Err(e),
+            Err(error) => {
+                self.http_statuses.remove(relative);
+                self.omit(relative, &error.to_string());
+                self.checkpoint("partial", false)?;
+                Err(error)
+            }
         }
     }
+    fn healthy_novel_images(&self, content: &str) -> HashMap<String, String> {
+        let mut images = HashMap::new();
+        for key in novel::image_refs(content) {
+            let (tag, id) = key.split_once(':').unwrap();
+            let prefix = format!("images/{tag}_{id}.");
+            if let Some(name) = self
+                .files
+                .iter()
+                .filter_map(|entry| entry["path"].as_str())
+                .find(|name| name.starts_with(&prefix))
+            {
+                images.insert(key, name.into());
+            }
+        }
+        images
+    }
+    fn resources(&self) -> Vec<Value> {
+        let mut resources = Vec::new();
+        let Some(body) = self.local_json("raw.json") else {
+            return resources;
+        };
+        if self.target.kind == "novel" {
+            if let Some(url) = body["coverUrl"].as_str().filter(|url| !url.is_empty()) {
+                let path = extension(url)
+                    .map(|ext| format!("cover{ext}"))
+                    .unwrap_or_else(|_| "cover".into());
+                resources.push(json!({"role":"cover","path":path,"source_url":url}));
+            }
+            for key in novel::image_refs(body["content"].as_str().unwrap_or("")) {
+                let (tag, id) = key.split_once(':').unwrap();
+                let url = if tag == "uploadedimage" {
+                    body["textEmbeddedImages"][id]["urls"]["original"]
+                        .as_str()
+                        .map(str::to_owned)
+                } else {
+                    self.relations
+                        .get(id)
+                        .and_then(|entry| {
+                            entry["value"][id]["illust"]["images"]["original"].as_str()
+                        })
+                        .map(str::to_owned)
+                };
+                let prefix = format!("images/{tag}_{id}.");
+                let path = url
+                    .as_deref()
+                    .and_then(|url| extension(url).ok())
+                    .map(|ext| format!("images/{tag}_{id}{ext}"))
+                    .or_else(|| {
+                        self.files
+                            .iter()
+                            .filter_map(|entry| entry["path"].as_str())
+                            .find(|path| path.starts_with(&prefix))
+                            .map(str::to_owned)
+                    });
+                resources.push(
+                    json!({"role":"inserted_image","reference":key,"path":path,"source_url":url}),
+                );
+            }
+        } else if body["illustType"] == 2 {
+            resources.push(json!({"role":"frames_metadata","path":"frames.json"}));
+            resources.push(json!({"role":"frames_zip","path":"frames.zip","source_url":self.local_json("frames.json").map(|motion| motion["originalSrc"].clone())}));
+        } else {
+            resources.push(json!({"role":"pages_metadata","path":"pages.json"}));
+            if let Some(pages) = self
+                .local_json("pages.json")
+                .and_then(|value| value.as_array().cloned())
+            {
+                for (i, page) in pages.iter().enumerate() {
+                    if let Some(url) = page["urls"]["original"].as_str() {
+                        let path = extension(url).map(|ext| format!("images/{i:04}{ext}")).ok();
+                        resources.push(json!({"role":"page","path":path,"source_url":url}));
+                    }
+                }
+            }
+        }
+        for resource in &mut resources {
+            let path = resource["path"].as_str();
+            let complete =
+                path.is_some_and(|path| self.files.iter().any(|entry| entry["path"] == path));
+            let failed = self.omissions.iter().any(|omission| {
+                path.is_some_and(|path| omission["resource"] == path)
+                    || omission["resource"] == resource["reference"]
+            });
+            let last_status = (!complete)
+                .then(|| path.and_then(|path| self.http_statuses.get(path)).copied())
+                .flatten();
+            resource["status"] = json!(if complete {
+                "complete"
+            } else if failed {
+                "missing"
+            } else {
+                "pending"
+            });
+            if let Some(status) = last_status {
+                resource["last_http_status"] = json!(status);
+            }
+        }
+        resources
+    }
+    fn checkpoint(&self, status: &str, preparing: bool) -> Result<()> {
+        let resources = self.resources();
+        let pending = resources
+            .iter()
+            .filter(|resource| resource["status"] != "complete")
+            .count();
+        let body_ready = self.target.kind == "novel"
+            && ["raw.json", "source.txt", "plain.txt"]
+                .iter()
+                .all(|path| self.files.iter().any(|entry| entry["path"] == *path));
+        let metadata_ready = ["raw.json", "metadata.json"]
+            .iter()
+            .all(|path| self.files.iter().any(|entry| entry["path"] == *path));
+        let mut omissions = self.omissions.clone();
+        if preparing && omissions.is_empty() {
+            omissions
+                .push(json!({"resource":"materials","reason":"Material verification is pending"}));
+        }
+        let manifest = json!({"schema_version":1,"tool_version":env!("CARGO_PKG_VERSION"),"key":self.target.key(),"source_url":self.target.url(),"archived_at":now(),"status":status,"completeness_scope":"supported work payload; excludes comments, likes and account data","files":self.files,"omissions":omissions,"stages":{"metadata_ready":metadata_ready,"body_ready":body_ready,"assets_pending":preparing || pending>0,"verified":status=="complete"},"resources":resources,"relations":self.relations,"snapshot_identity":self.local_json("raw.json").map(|body| snapshot_identity(&body))});
+        atomic(
+            &self.archive.path(self.target, "manifest.json")?,
+            &serde_json::to_vec_pretty(&manifest)?,
+        )
+    }
+}
+
+fn frame_names(motion: &Value) -> Result<HashSet<String>> {
+    crate::transport::validate_url(str_at(motion, "originalSrc")?, true)?;
+    let frames = motion["frames"]
+        .as_array()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| invalid("Missing ugoira frame timing"))?;
+    let mut names = HashSet::new();
+    for frame in frames {
+        let name = str_at(frame, "file")?;
+        let delay = frame["delay"]
+            .as_f64()
+            .ok_or_else(|| invalid("Invalid ugoira delay"))?;
+        if name.is_empty()
+            || name.contains(['/', '\\', ':'])
+            || name.chars().any(char::is_control)
+            || !delay.is_finite()
+            || !(0.0 < delay && delay <= 3600000.0)
+            || !names.insert(name.to_owned())
+        {
+            return Err(invalid("Invalid ugoira frame metadata"));
+        }
+    }
+    Ok(names)
 }
 
 fn validate_frames(path: &Path, expected: &HashSet<String>) -> Result<()> {
@@ -693,7 +1327,14 @@ fn validate_frames(path: &Path, expected: &HashSet<String>) -> Result<()> {
         let read = std::io::copy(
             &mut member.by_ref().take(256 * 1024 * 1024 + 1),
             &mut std::io::sink(),
-        )?;
+        )
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                invalid("Ugoira ZIP CRC or compressed payload validation failed")
+            } else {
+                Error::Io(error)
+            }
+        })?;
         total += read;
         if read > 256 * 1024 * 1024 || total > 1024 * 1024 * 1024 {
             return Err(invalid("Ugoira expanded data exceeds validation limit"));
@@ -708,6 +1349,583 @@ pub type SharedArchive = Arc<Archive>;
 mod tests {
     use super::*;
     use crate::transport::{Fixture, DEMO};
+    struct BudgetTransport {
+        fixture: Fixture,
+        budget: usize,
+    }
+    impl Transport for BudgetTransport {
+        fn api(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+            if self.fixture.requests() >= self.budget {
+                return Err(Error::Budget);
+            }
+            self.fixture.api(path, query)
+        }
+        fn download(&self, url: &str, path: &Path) -> Result<()> {
+            if self.fixture.requests() >= self.budget {
+                return Err(Error::Budget);
+            }
+            self.fixture.download(url, path)
+        }
+        fn requests(&self) -> usize {
+            self.fixture.requests()
+        }
+        fn stopped(&self) -> bool {
+            self.fixture.stopped()
+        }
+        fn cancel(&self) {
+            self.fixture.cancel();
+        }
+    }
+    #[test]
+    fn body_is_usable_before_media_and_budget_does_not_cancel_other_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        let client = BudgetTransport {
+            fixture: Fixture::new(DEMO, Arc::default()).unwrap(),
+            budget: 1,
+        };
+        assert_eq!(archive.prepare(&target, &client).unwrap(), "assets_pending");
+        assert_eq!(client.requests(), 1);
+        let manifest = archive.manifest(&target).unwrap();
+        assert_eq!(manifest["status"], "partial");
+        assert_eq!(manifest["stages"]["body_ready"], true);
+        assert!(manifest["resources"].as_array().unwrap().len() >= 3);
+        assert!(!archive.complete(&target).unwrap());
+        assert_eq!(archive.collect_work(&target, &|| false).copied, 1);
+        assert!(temp.path().join("works/novel/novel_1004.txt").is_file());
+        assert!(matches!(
+            archive.finish(&target, &client),
+            Err(Error::Budget)
+        ));
+        assert!(!client.stopped());
+        assert_eq!(archive.status(&target).unwrap().as_deref(), Some("paused"));
+        assert_eq!(archive.verify().unwrap()["valid"], 1);
+        let resumed = Fixture::new(DEMO, Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &resumed).unwrap(), "complete");
+        assert_eq!(resumed.requests(), 4, "detail is already checkpointed");
+        assert_eq!(
+            archive.manifest(&target).unwrap()["stages"]["verified"],
+            true
+        );
+    }
+    #[test]
+    fn interrupted_material_checkpoint_repairs_only_missing_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        let client = BudgetTransport {
+            fixture: Fixture::new(DEMO, Arc::default()).unwrap(),
+            budget: 2,
+        };
+        assert!(matches!(archive.save(&target, &client), Err(Error::Budget)));
+        assert!(temp.path().join("works/novel_1004/cover.png").is_file());
+        let resumed = Fixture::new(DEMO, Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &resumed).unwrap(), "complete");
+        assert_eq!(
+            resumed.requests(),
+            3,
+            "healthy detail and cover must not be fetched"
+        );
+        fs::write(temp.path().join("works/novel_1004/plain.txt"), b"broken").unwrap();
+        let repair = Fixture::new(DEMO, Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &repair).unwrap(), "complete");
+        assert_eq!(
+            repair.requests(),
+            0,
+            "plain text can be rebuilt from verified raw without HTTP"
+        );
+    }
+    #[test]
+    fn partial_cover_retry_uses_cached_relations_and_legacy_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        data["assets"]
+            .as_object_mut()
+            .unwrap()
+            .remove("https://i.pximg.net/synthetic/pixiv-archive-lab/1004_cover.png");
+        let client = Fixture::new(&data.to_string(), Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &client).unwrap(), "partial");
+        let mut manifest = archive.manifest(&target).unwrap();
+        // Emulate an alpha.1 partial snapshot with no additive stage/relations fields.
+        for key in ["relations", "snapshot_identity", "stages", "resources"] {
+            manifest.as_object_mut().unwrap().remove(key);
+        }
+        atomic(
+            &temp.path().join("works/novel_1004/manifest.json"),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let repaired = Fixture::new(DEMO, Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &repaired).unwrap(), "complete");
+        assert_eq!(
+            repaired.requests(),
+            1,
+            "only the missing cover is needed, even for a legacy partial"
+        );
+    }
+    #[test]
+    fn changed_remote_snapshot_does_not_overwrite_preserved_payload() {
+        for kind in ["novel", "art"] {
+            let temp = tempfile::tempdir().unwrap();
+            let archive = Archive::open(temp.path(), false).unwrap();
+            let id = if kind == "novel" { "1004" } else { "1001" };
+            let target = Target::new(kind, id).unwrap();
+            let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+            assert_eq!(archive.save(&target, &fixture).unwrap(), "complete");
+            let root = temp.path().join(format!("works/{}", target.key()));
+            let manifest = fs::read(root.join("manifest.json")).unwrap();
+            let metadata = fs::read(root.join("metadata.json")).unwrap();
+            fs::write(root.join("raw.json"), b"damaged raw").unwrap();
+            let mut changed: Value = serde_json::from_str(DEMO).unwrap();
+            let endpoint = if kind == "novel" { "novel" } else { "illust" };
+            if kind == "novel" {
+                changed["responses"][format!("/ajax/{endpoint}/{id}")]["coverUrl"] =
+                    json!("https://i.pximg.net/synthetic/new-cover.png");
+            } else {
+                changed["responses"][format!("/ajax/{endpoint}/{id}")]["uploadDate"] =
+                    json!("2026-02-02T00:00:00+09:00");
+            }
+            let changed = Fixture::new(&changed.to_string(), Arc::default()).unwrap();
+            assert_eq!(archive.save(&target, &changed).unwrap(), "failed");
+            assert!(archive
+                .reason(&target)
+                .unwrap()
+                .unwrap()
+                .contains("update_needed"));
+            assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
+            assert_eq!(fs::read(root.join("metadata.json")).unwrap(), metadata);
+            assert_eq!(fs::read(root.join("raw.json")).unwrap(), b"damaged raw");
+        }
+    }
+    #[test]
+    fn wrong_manifest_identity_is_not_complete_or_exported() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("art:1001").unwrap();
+        let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+        archive.save(&target, &fixture).unwrap();
+        let mut manifest = archive.manifest(&target).unwrap();
+        manifest["key"] = json!("art_9999");
+        atomic(
+            &temp.path().join("works/art_1001/manifest.json"),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(!archive.complete(&target).unwrap());
+        assert_eq!(archive.verify().unwrap()["valid"], 0);
+        let export = tempfile::tempdir().unwrap();
+        assert!(archive.pack(&export.path().join("export.zip")).is_err());
+    }
+    #[test]
+    fn legacy_damaged_raw_refuses_unsafe_snapshot_reconstruction() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+        archive.save(&target, &fixture).unwrap();
+        let mut manifest = archive.manifest(&target).unwrap();
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("snapshot_identity");
+        let root = temp.path().join("works/novel_1004");
+        atomic(
+            &root.join("manifest.json"),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("raw.json"), b"damaged").unwrap();
+        let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &fixture).unwrap(), "failed");
+        assert_eq!(fixture.requests(), 0);
+        assert!(archive
+            .reason(&target)
+            .unwrap()
+            .unwrap()
+            .contains("update_needed"));
+        assert_eq!(fs::read(root.join("raw.json")).unwrap(), b"damaged");
+    }
+    #[test]
+    fn crc_invalid_zip_is_not_reused_on_repair() {
+        use base64::Engine;
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("art:1003").unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for name in ["000000.png", "000001.png"] {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(b"synthetic-payload").unwrap();
+        }
+        let mut bytes = zip.finish().unwrap().into_inner();
+        let pos = bytes
+            .windows(17)
+            .position(|window| window == b"synthetic-payload")
+            .unwrap();
+        bytes[pos] ^= 1;
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        data["assets"]["https://i.pximg.net/synthetic/pixiv-archive-lab/1003_ugoira.zip"] =
+            json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+        let bad = Fixture::new(&data.to_string(), Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &bad).unwrap(), "failed");
+        assert!(!archive.manifest(&target).unwrap()["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["path"] == "frames.zip"));
+        let good = Fixture::new(DEMO, Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &good).unwrap(), "complete");
+        assert_eq!(
+            good.requests(),
+            1,
+            "only ZIP needs fetching; frame metadata and detail are checkpointed"
+        );
+    }
+    #[test]
+    fn complete_manifest_cannot_omit_required_novel_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+        archive.save(&target, &fixture).unwrap();
+        let mut manifest = archive.manifest(&target).unwrap();
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["path"] != "plain.txt");
+        atomic(
+            &temp.path().join("works/novel_1004/manifest.json"),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(!archive.complete(&target).unwrap());
+        assert!(archive
+            .check(&target)
+            .iter()
+            .any(|error| error.contains("plain.txt")));
+    }
+    #[test]
+    fn fatal_io_errors_are_propagated_to_the_job_controller() {
+        struct DiskFailure;
+        impl Transport for DiskFailure {
+            fn api(&self, _: &str, _: &[(&str, String)]) -> Result<Value> {
+                Err(Error::Io(std::io::Error::other("simulated disk full")))
+            }
+            fn download(&self, _: &str, _: &Path) -> Result<()> {
+                unreachable!()
+            }
+            fn requests(&self) -> usize {
+                0
+            }
+            fn stopped(&self) -> bool {
+                false
+            }
+            fn cancel(&self) {}
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        assert!(matches!(
+            archive.prepare(&target, &DiskFailure),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(archive.status(&target).unwrap().as_deref(), Some("failed"));
+    }
+    #[test]
+    fn os_lock_releases_and_only_versioned_stale_sentinels_are_recovered() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        assert!(Archive::open(temp.path(), false).is_err());
+        assert!(temp.path().join(".archive.lock").exists());
+        assert!(temp.path().join(".run.lock").exists());
+        drop(archive);
+        assert!(!temp.path().join(".run.lock").exists());
+        // Persistent guard is never unlinked, avoiding different-inode lock races.
+        assert!(temp.path().join(".archive.lock").exists());
+        fs::write(
+            temp.path().join(".run.lock"),
+            "OpenPixivDownloader archive lock v2\n999999\n",
+        )
+        .unwrap();
+        let archive = Archive::open(temp.path(), true).unwrap();
+        assert!(Archive::open(temp.path(), false).is_err());
+        drop(archive);
+        fs::write(temp.path().join(".run.lock"), "999999\n").unwrap();
+        assert!(Archive::open(temp.path(), true)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Legacy archive lock"));
+        assert_eq!(
+            fs::read(temp.path().join(".run.lock")).unwrap(),
+            b"999999\n"
+        );
+    }
+    #[test]
+    fn damaged_raw_same_snapshot_is_repaired_without_refetching_materials() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+        archive.save(&target, &fixture).unwrap();
+        fs::write(temp.path().join("works/novel_1004/raw.json"), b"damaged").unwrap();
+        let repaired = Fixture::new(DEMO, Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &repaired).unwrap(), "complete");
+        assert_eq!(repaired.requests(), 1);
+    }
+    #[test]
+    fn complete_manifest_cannot_drop_an_expected_media_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("art:1001").unwrap();
+        let fixture = Fixture::new(DEMO, Arc::default()).unwrap();
+        archive.save(&target, &fixture).unwrap();
+        let mut manifest = archive.manifest(&target).unwrap();
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["path"] != "images/0000.png");
+        atomic(
+            &temp.path().join("works/art_1001/manifest.json"),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(!archive.complete(&target).unwrap());
+        assert!(archive
+            .check(&target)
+            .iter()
+            .any(|error| error.contains("expected material")));
+    }
+    #[test]
+    fn optional_cover_disk_failure_still_stops_the_job() {
+        struct CoverDiskFailure(Fixture);
+        impl Transport for CoverDiskFailure {
+            fn api(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+                self.0.api(path, query)
+            }
+            fn download(&self, _: &str, _: &Path) -> Result<()> {
+                Err(Error::Io(std::io::Error::other("simulated disk full")))
+            }
+            fn requests(&self) -> usize {
+                self.0.requests()
+            }
+            fn stopped(&self) -> bool {
+                self.0.stopped()
+            }
+            fn cancel(&self) {
+                self.0.cancel();
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        let client = CoverDiskFailure(Fixture::new(DEMO, Arc::default()).unwrap());
+        assert_eq!(archive.prepare(&target, &client).unwrap(), "assets_pending");
+        assert!(matches!(
+            archive.finish(&target, &client),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(
+            archive.manifest(&target).unwrap()["stages"]["body_ready"],
+            true
+        );
+    }
+    #[test]
+    fn invalid_api_metadata_is_not_cached_forever() {
+        for target_string in ["art:1001", "art:1003"] {
+            let temp = tempfile::tempdir().unwrap();
+            let archive = Archive::open(temp.path(), false).unwrap();
+            let target = Target::parse(target_string).unwrap();
+            let mut data: Value = serde_json::from_str(DEMO).unwrap();
+            if target.id == "1001" {
+                data["responses"]["/ajax/illust/1001/pages"] = json!([]);
+            } else {
+                data["responses"]["/ajax/illust/1003/ugoira_meta"]["frames"] = json!([]);
+            }
+            let bad = Fixture::new(&data.to_string(), Arc::default()).unwrap();
+            assert_eq!(archive.save(&target, &bad).unwrap(), "failed");
+            let good = Fixture::new(DEMO, Arc::default()).unwrap();
+            assert_eq!(archive.save(&target, &good).unwrap(), "complete");
+            assert_eq!(
+                good.requests(),
+                2,
+                "re-fetch corrected metadata and missing media only"
+            );
+        }
+    }
+    #[test]
+    fn inaccessible_insertion_relation_can_be_retried_explicitly() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        data["responses"]["/ajax/novel/1004/insert_illusts?id%5B%5D=1002-2"]["1002-2"]["visible"] =
+            json!(false);
+        let bad = Fixture::new(&data.to_string(), Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &bad).unwrap(), "partial");
+        let good = Fixture::new(DEMO, Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &good).unwrap(), "complete");
+        assert_eq!(good.requests(), 2);
+    }
+    struct MissingMedia {
+        fixture: Fixture,
+        needle: &'static str,
+        status: u16,
+        failures: std::sync::atomic::AtomicUsize,
+    }
+    impl Transport for MissingMedia {
+        fn api(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+            self.fixture.api(path, query)
+        }
+        fn download(&self, url: &str, path: &Path) -> Result<()> {
+            if url.contains(self.needle) {
+                self.failures
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(Error::Missing {
+                    status: self.status,
+                })
+            } else {
+                self.fixture.download(url, path)
+            }
+        }
+        fn requests(&self) -> usize {
+            self.fixture.requests() + self.failures.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn stopped(&self) -> bool {
+            self.fixture.stopped()
+        }
+        fn cancel(&self) {
+            self.fixture.cancel();
+        }
+    }
+    #[test]
+    fn typed_stale_cover_rechecks_detail_once_and_repairs_only_the_cover() {
+        for status in [404, 410] {
+            let temp = tempfile::tempdir().unwrap();
+            let archive = Archive::open(temp.path(), false).unwrap();
+            let target = Target::parse("novel:1004").unwrap();
+            let bad = MissingMedia {
+                fixture: Fixture::new(DEMO, Arc::default()).unwrap(),
+                needle: "1004_cover",
+                status,
+                failures: 0.into(),
+            };
+            assert_eq!(archive.save(&target, &bad).unwrap(), "partial");
+            let manifest = archive.manifest(&target).unwrap();
+            assert_eq!(
+                manifest["resources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|resource| resource["role"] == "cover")
+                    .unwrap()["last_http_status"],
+                status
+            );
+            let repaired = Fixture::new(DEMO, Arc::default()).unwrap();
+            assert_eq!(archive.save(&target, &repaired).unwrap(), "complete");
+            assert_eq!(
+                repaired.requests(),
+                2,
+                "one detail refresh and one missing cover"
+            );
+            assert!(!archive.manifest(&target).unwrap()["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|resource| resource.get("last_http_status").is_some()));
+        }
+    }
+    #[test]
+    fn stale_cover_changed_reference_requires_update_without_mixing_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        let bad = MissingMedia {
+            fixture: Fixture::new(DEMO, Arc::default()).unwrap(),
+            needle: "1004_cover",
+            status: 404,
+            failures: 0.into(),
+        };
+        assert_eq!(archive.save(&target, &bad).unwrap(), "partial");
+        let root = temp.path().join("works/novel_1004");
+        let saved: Vec<_> = [
+            "raw.json",
+            "source.txt",
+            "plain.txt",
+            "metadata.json",
+            "manifest.json",
+        ]
+        .into_iter()
+        .map(|name| (name, fs::read(root.join(name)).unwrap()))
+        .collect();
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        data["responses"]["/ajax/novel/1004"]["coverUrl"] =
+            json!("https://i.pximg.net/synthetic/new-cover.png");
+        let updated = Fixture::new(&data.to_string(), Arc::default()).unwrap();
+        assert_eq!(archive.save(&target, &updated).unwrap(), "failed");
+        assert_eq!(updated.requests(), 1);
+        assert!(archive
+            .reason(&target)
+            .unwrap()
+            .unwrap()
+            .contains("update_needed"));
+        for (name, bytes) in saved {
+            assert_eq!(fs::read(root.join(name)).unwrap(), bytes);
+        }
+    }
+    #[test]
+    fn unchanged_stale_cover_remains_explicitly_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let target = Target::parse("novel:1004").unwrap();
+        for _ in 0..2 {
+            let bad = MissingMedia {
+                fixture: Fixture::new(DEMO, Arc::default()).unwrap(),
+                needle: "1004_cover",
+                status: 404,
+                failures: 0.into(),
+            };
+            assert_eq!(archive.save(&target, &bad).unwrap(), "partial");
+        }
+        let manifest = archive.manifest(&target).unwrap();
+        assert_eq!(manifest["status"], "partial");
+        assert_eq!(
+            manifest["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|resource| resource["role"] == "cover")
+                .unwrap()["last_http_status"],
+            404
+        );
+        assert!(!archive.complete(&target).unwrap());
+    }
+    #[test]
+    fn stale_artwork_or_inserted_image_refreshes_reference_metadata() {
+        for (target_text, needle, expected) in [
+            ("art:1001", "1001_p0", 3),
+            ("art:1003", "1003_ugoira", 3),
+            ("novel:1004", "1002_p1", 3),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let archive = Archive::open(temp.path(), false).unwrap();
+            let target = Target::parse(target_text).unwrap();
+            let bad = MissingMedia {
+                fixture: Fixture::new(DEMO, Arc::default()).unwrap(),
+                needle,
+                status: 404,
+                failures: 0.into(),
+            };
+            assert_eq!(archive.save(&target, &bad).unwrap(), "partial");
+            let good = Fixture::new(DEMO, Arc::default()).unwrap();
+            assert_eq!(archive.save(&target, &good).unwrap(), "complete");
+            assert_eq!(good.requests(), expected, "{target_text}");
+        }
+    }
     #[test]
     fn four_formats_resume_repair_and_export() {
         let temp = tempfile::tempdir().unwrap();

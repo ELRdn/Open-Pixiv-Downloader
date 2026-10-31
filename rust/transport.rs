@@ -186,6 +186,8 @@ struct ClassStats {
     transfer_seconds: f64,
     headers: Vec<f64>,
     transfers: Vec<f64>,
+    headers_seen: usize,
+    transfers_seen: usize,
     errors: BTreeMap<&'static str, usize>,
 }
 impl ClassStats {
@@ -203,7 +205,10 @@ impl ClassStats {
             "header_seconds":self.header_seconds,"transfer_seconds":self.transfer_seconds,
             "header_p50_seconds":percentile(&self.headers,0.5),"header_p95_seconds":percentile(&self.headers,0.95),
             "transfer_p50_seconds":percentile(&self.transfers,0.5),"transfer_p95_seconds":percentile(&self.transfers,0.95),
-            "errors":self.errors,"timing_sample":"latest_2048_requests"})
+            "errors":self.errors,"timing_sample":"latest_2048_attempt_samples",
+            "header_sample_count":self.headers.len(),"transfer_sample_count":self.transfers.len(),
+            "header_samples_total":self.headers_seen,"transfer_samples_total":self.transfers_seen,
+            "timing_sample_limit":2048})
     }
 }
 #[derive(Default)]
@@ -404,9 +409,6 @@ impl Online {
             .entry(kind)
             .or_default() += 1;
     }
-    fn open(&self, value: &str, asset: bool) -> Result<Opened<'_>> {
-        self.open_validated(validate_url(value, asset)?, asset)
-    }
     fn open_validated(&self, url: Url, asset: bool) -> Result<Opened<'_>> {
         self.open_attempt(url, asset, false)
     }
@@ -432,9 +434,10 @@ impl Online {
             if gate.stats[class].headers.len() < 2048 {
                 gate.stats[class].headers.push(elapsed);
             } else {
-                let index = gate.stats[class].requests % 2048;
+                let index = gate.stats[class].headers_seen % 2048;
                 gate.stats[class].headers[index] = elapsed;
             }
+            gate.stats[class].headers_seen += 1;
         }
         let response = response.map_err(|e| {
             let kind = if e.is_timeout() {
@@ -468,7 +471,9 @@ impl Online {
             }
             404 | 410 => {
                 self.error(class, "unavailable");
-                Err(Error::Unavailable("Resource unavailable".into()))
+                Err(Error::Missing {
+                    status: response.status().as_u16(),
+                })
             }
             200 => Ok(Opened { response, permit }),
             500..=599 => {
@@ -555,9 +560,10 @@ impl Online {
         if stats.transfers.len() < 2048 {
             stats.transfers.push(elapsed);
         } else {
-            let index = stats.requests % 2048;
+            let index = stats.transfers_seen % 2048;
             stats.transfers[index] = elapsed;
         }
+        stats.transfers_seen += 1;
         if result.is_ok() {
             stats.completed += 1;
         } else {
@@ -572,6 +578,33 @@ impl Online {
         }
         drop(gate);
         result
+    }
+    fn api_validated(&self, url: Url) -> Result<Value> {
+        let opened = self
+            .open_validated(url, false)
+            .map_err(|error| match error {
+                Error::Missing { status } => {
+                    Error::Unavailable(format!("HTTP {status}; resource unavailable"))
+                }
+                other => other,
+            })?;
+        let mut bytes = Vec::new();
+        self.read(opened, &mut bytes, 16 * 1024 * 1024, false)?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            self.stop_error(
+                StopReason::UnexpectedContent,
+                "Expected JSON; incompatible response",
+            )
+        })?;
+        if !value.is_object() || value.get("error").is_none() || value.get("body").is_none() {
+            return Err(invalid("API envelope changed"));
+        }
+        if value["error"] != false {
+            return Err(Error::Unavailable(
+                "API reports inaccessible resource".into(),
+            ));
+        }
+        Ok(value["body"].clone())
     }
     fn download_validated(&self, url: Url, path: &Path) -> Result<()> {
         std::fs::create_dir_all(path.parent().unwrap())?;
@@ -609,27 +642,11 @@ impl Online {
 }
 impl Transport for Online {
     fn api(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
-        let opened = self.open(
+        let url = validate_url(
             &format!("https://www.pixiv.net{}", api_key(path, query)?),
             false,
         )?;
-        let mut bytes = Vec::new();
-        self.read(opened, &mut bytes, 16 * 1024 * 1024, false)?;
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
-            self.stop_error(
-                StopReason::UnexpectedContent,
-                "Expected JSON; incompatible response",
-            )
-        })?;
-        if !value.is_object() || value.get("error").is_none() || value.get("body").is_none() {
-            return Err(invalid("API envelope changed"));
-        }
-        if value["error"] != false {
-            return Err(Error::Unavailable(
-                "API reports inaccessible resource".into(),
-            ));
-        }
-        Ok(value["body"].clone())
+        self.api_validated(url)
     }
     fn download(&self, url: &str, path: &Path) -> Result<()> {
         self.download_validated(validate_url(url, true)?, path)
@@ -1010,6 +1027,30 @@ mod tests {
         assert_eq!(client.metrics()["retries"], 0);
         assert!(!client.stopped());
         server.join().unwrap();
+    }
+    #[test]
+    fn missing_media_is_typed_but_missing_api_remains_unavailable() {
+        for status in [404, 410] {
+            let (url, server) = server(status, "gone", 1);
+            let client = client(5);
+            let temp = tempfile::tempdir().unwrap();
+            assert!(
+                matches!(client.download_validated(url, &temp.path().join("out")), Err(Error::Missing { status: value }) if value == status)
+            );
+            assert_eq!(client.requests(), 1);
+            assert_eq!(client.metrics()["retries"], 0);
+            assert!(!client.stopped());
+            server.join().unwrap();
+            let (url, server) = self::server(status, "gone", 1);
+            let client = self::client(5);
+            assert!(matches!(
+                client.api_validated(url),
+                Err(Error::Unavailable(_))
+            ));
+            assert_eq!(client.requests(), 1);
+            assert!(!client.stopped());
+            server.join().unwrap();
+        }
     }
     #[test]
     fn strict_remote_origins_and_profiles() {

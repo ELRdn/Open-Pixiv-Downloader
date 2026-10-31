@@ -23,6 +23,8 @@ pub enum Error {
     Stop(String),
     #[error("{0}")]
     Unavailable(String),
+    #[error("HTTP {status}; resource unavailable")]
+    Missing { status: u16 },
     #[error("Filesystem operation failed ({0})")]
     Io(#[from] std::io::Error),
     #[error("Archive database operation failed ({0})")]
