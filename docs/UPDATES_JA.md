@@ -71,3 +71,5 @@ python tools/check_update.py target/release/opixiv
 ```
 
 Windowsでは `target/release/opixiv.exe`。Windows／LinuxのCIに追加したが、このクラウドでの実行確認はLinuxのみ。Windowsの実機・CI結果を確認済みとはしない。
+
+Linuxでは公開mainから実際のCargoビルド・自己置換も使い捨ての本体コピーで確認した。更新後の版と、CargoがPATHにない環境でも確認だけなら本体ハッシュを変えずに終了することを照合。[検証記録](evidence/self-update-alpha6.json)。

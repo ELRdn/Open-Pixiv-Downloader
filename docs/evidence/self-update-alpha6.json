@@ -63,5 +63,16 @@
     "corruption_repair": "passed"
   },
   "date_jst": "2026-11-01",
-  "windows": "Native implementation and CI configured; not run on this Linux host"
+  "windows": "Native implementation and CI configured; not run on this Linux host",
+  "real_git_install": {
+    "source_revision": "47113f3d2dc36f7973bb647ef2f0f2b112413903",
+    "platform": "Linux",
+    "fixed_main_build": "passed",
+    "force_self_replacement": "passed",
+    "installed_version": "opixiv 0.2.0-alpha.6",
+    "check_without_cargo_on_path": "passed",
+    "check_keeps_executable_hash": true,
+    "check_output": "Open Pixiv Downloader 更新\n現在: v0.2.0-alpha.6\n新しいアップデートはありません（GitHub: v0.2.0-alpha.6）。",
+    "scope": "Real Cargo installation from published official main into isolated stage, self replacement of disposable executable copy only; no user archives accessed"
+  }
 }
