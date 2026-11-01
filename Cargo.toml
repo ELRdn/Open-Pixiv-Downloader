@@ -1,6 +1,6 @@
 [package]
 name = "open-pixiv-downloader"
-version = "0.2.0-alpha.5"
+version = "0.2.0-alpha.6"
 edition = "2021"
 rust-version = "1.89"
 description = "Local Pixiv archive CLI and Ratatui terminal interface"
@@ -31,6 +31,7 @@ thiserror = "2"
 unicode-width = "0.2"
 url = "2"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
+self-replace = "1.5"
 
 [profile.release]
 lto = "thin"

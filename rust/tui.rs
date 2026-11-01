@@ -565,7 +565,7 @@ impl App {
         } else {
             String::new()
         };
-        format!("{}\n\n現在: v{}\n{latest}\n{error}\n更新は、ツールを終了してPowerShellで1つのコマンドを実行します。\n保存済みの作品は引き続き利用できます。\nリポジトリへの移動やgit pullは不要です。\n\n{}\n\nEsc: この画面を閉じる",self.update_status.message(),env!("CARGO_PKG_VERSION"),if self.worker.is_some(){"保存処理が動いています。終了後にEnterで更新コマンドを表示できます。"}else{"Enter: ツールを終了し、コピー用の更新コマンドを表示"})
+        format!("{}\n\n現在: v{}\n{latest}\n{error}\n更新は、ツールを終了してPowerShellで opixiv update を実行します。\n保存済みの作品は引き続き利用できます。\nリポジトリへの移動やgit pullは不要です。\n\n{}\n\nEsc: この画面を閉じる",self.update_status.message(),env!("CARGO_PKG_VERSION"),if self.worker.is_some(){"保存処理が動いています。終了後にEnterで更新コマンドを表示できます。"}else{"Enter: ツールを終了し、コピー用の更新コマンドを表示"})
     }
     fn set_row(&mut self, key: String, status: String) {
         self.dirty = true;

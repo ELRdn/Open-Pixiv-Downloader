@@ -39,6 +39,15 @@ enum Command {
     /// Launch the interactive terminal interface
     #[command(alias = "interactive")]
     Tui,
+    /// Update this executable from the official main branch
+    Update {
+        /// Check the latest version without installing
+        #[arg(long, conflicts_with = "force")]
+        check: bool,
+        /// Rebuild/reinstall without the advisory version check
+        #[arg(long)]
+        force: bool,
+    },
     /// List target IDs without downloading media
     Plan(FetchArgs),
     /// Save works with checksums and resumable state
@@ -113,6 +122,9 @@ impl From<FetchArgs> for Options {
 }
 fn execute() -> error::Result<i32> {
     let cli = Cli::parse();
+    if let Some(Command::Update { check, force }) = &cli.command {
+        return update::install(*check, *force);
+    }
     if matches!(cli.command, None | Some(Command::Tui)) {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             return Err(error::invalid(
@@ -140,7 +152,7 @@ fn execute() -> error::Result<i32> {
             archive::Archive::open(&out, true)?.collect(&|| stop.load(Ordering::SeqCst))?
         }
         Command::Pack { out, zip } => archive::Archive::open(&out, true)?.pack(&zip)?,
-        Command::Tui => unreachable!(),
+        Command::Tui | Command::Update { .. } => unreachable!(),
     };
     println!("{}", serde_json::to_string_pretty(&result)?);
     if interrupted.load(Ordering::SeqCst) {
@@ -174,6 +186,20 @@ fn main() {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    #[test]
+    fn update_cli_supports_check_and_force_as_separate_modes() {
+        for args in [
+            vec!["opixiv", "update"],
+            vec!["opixiv", "update", "--check"],
+            vec!["opixiv", "update", "--force"],
+        ] {
+            assert!(matches!(
+                Cli::try_parse_from(args).unwrap().command,
+                Some(Command::Update { .. })
+            ));
+        }
+        assert!(Cli::try_parse_from(["opixiv", "update", "--check", "--force"]).is_err());
+    }
     fn options(args: &[&str]) -> Options {
         let cli = Cli::try_parse_from(args).unwrap();
         let Some(Command::Fetch(args)) = cli.command else {

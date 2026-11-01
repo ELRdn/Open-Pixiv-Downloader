@@ -1,12 +1,21 @@
-//! Advisory update checks. Remote data never becomes an executable command.
+//! Fixed-source update checks and staged self replacement.
+use crate::error::{invalid, Result as AppResult};
 use reqwest::blocking::Client;
 use semver::Version;
 use serde::Deserialize;
-use std::{io::Read, sync::mpsc, thread, time::Duration};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 
 pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/ELRdn/Open-Pixiv-Downloader/main/Cargo.toml";
-pub const INSTALL_COMMAND:&str="cargo install --git https://github.com/ELRdn/Open-Pixiv-Downloader.git --branch main --locked --force";
+pub const UPDATE_COMMAND: &str = "opixiv update";
+const REPOSITORY: &str = "https://github.com/ELRdn/Open-Pixiv-Downloader.git";
 const MAX_MANIFEST: usize = 64 * 1024;
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(60);
@@ -67,7 +76,7 @@ fn fetch(client: &Client, url: &str) -> Result<Version, String> {
     let response = client
         .get(url)
         .send()
-        .map_err(|_| "GitHubに接続できません。F8で再確認できます。")?;
+        .map_err(|_| "GitHubに接続できません。時間をおいて再確認してください。")?;
     if !response.status().is_success() {
         return Err(format!(
             "GitHubの更新情報を取得できません（HTTP {}）。",
@@ -109,12 +118,235 @@ pub fn background() -> mpsc::Receiver<Result<Version, String>> {
     receiver
 }
 pub fn print_instructions() {
-    println!("\nOpen Pixiv Downloaderの更新：PowerShellで次の1行を実行してください。\n\n{INSTALL_COMMAND}\n\n更新後は opixiv で起動できます。");
+    println!("\nOpen Pixiv Downloaderの更新：PowerShellで次を実行してください。\n\n{UPDATE_COMMAND}\n\n更新確認のみ: opixiv update --check\n更新後は opixiv で起動できます。");
+}
+
+fn cargo_command(root: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command.args([
+        "install", "--git", REPOSITORY, "--branch", "main", "--locked", "--force", "--bin",
+        "opixiv", "--root",
+    ]);
+    command.arg(root);
+    command
+}
+fn candidate_path(root: &Path) -> PathBuf {
+    root.join("bin").join(if cfg!(windows) {
+        "opixiv.exe"
+    } else {
+        "opixiv"
+    })
+}
+fn binary_version(output: &[u8]) -> AppResult<Version> {
+    let text = std::str::from_utf8(output)
+        .map_err(|_| invalid("更新版のバージョン情報を読み取れません。"))?;
+    let mut parts = text.split_whitespace();
+    if parts.next() != Some("opixiv") {
+        return Err(invalid("更新版の製品名が一致しません。"));
+    }
+    let version = parts
+        .next()
+        .ok_or_else(|| invalid("更新版のバージョン情報がありません。"))?;
+    if parts.next().is_some() {
+        return Err(invalid("更新版のバージョン情報の形式が不正です。"));
+    }
+    Version::parse(version).map_err(|_| invalid("更新版のバージョン情報の形式が不正です。"))
+}
+fn validate_candidate(
+    candidate: &Path,
+    current: &Version,
+    expected: Option<&Version>,
+) -> AppResult<Version> {
+    let metadata = std::fs::symlink_metadata(candidate)
+        .map_err(|_| invalid("Cargoは終了しましたが、更新版の実行ファイルが見つかりません。"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(invalid(
+            "更新版の実行ファイルが通常のファイルではありません。",
+        ));
+    }
+    let directory = candidate
+        .parent()
+        .ok_or_else(|| invalid("更新版の保存先が不明です。"))?;
+    let capture = tempfile::NamedTempFile::new_in(directory)?;
+    let mut child = Command::new(candidate)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(capture.as_file().try_clone()?))
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| invalid("更新版を起動してバージョンを検証できません。"))?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        if started.elapsed() >= Duration::from_secs(5) || capture.as_file().metadata()?.len() > 4096
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(invalid("更新版のバージョン検証が時間または出力の上限を超えました。現在の実行ファイルは変更していません。"));
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    if !status.success() {
+        return Err(invalid("更新版のバージョン検証に失敗しました。"));
+    }
+    if capture.as_file().metadata()?.len() > 4096 {
+        return Err(invalid("更新版のバージョン出力が上限を超えました。"));
+    }
+    let output = std::fs::read(capture.path())?;
+    let version = binary_version(&output)?;
+    if version.cmp_precedence(current).is_lt()
+        || expected.is_some_and(|v| version.cmp_precedence(v).is_lt())
+    {
+        return Err(invalid(
+            "取得した更新版が現在または確認済みのバージョンより古いため、置き換えを中止しました。",
+        ));
+    }
+    Ok(version)
+}
+fn require_tool(program: &str) -> AppResult<()> {
+    let output=Command::new(program).arg("--version").stdin(Stdio::null()).output()
+        .map_err(|_|invalid(&format!("{program} を起動できません。Rust/CargoとGitをインストールし、PowerShellを開き直してください。")))?;
+    if !output.status.success() {
+        return Err(invalid(&format!(
+            "{program} の起動確認に失敗しました。Rust/CargoとGitを確認してください。"
+        )));
+    }
+    Ok(())
+}
+
+fn restore_if_missing(original: &Path, backup: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(original) {
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let directory = original
+        .parent()
+        .ok_or_else(|| std::io::Error::other("Missing executable directory"))?;
+    let temp = tempfile::NamedTempFile::new_in(directory)?;
+    std::fs::copy(backup, temp.path())?;
+    temp.as_file().sync_all()?;
+    temp.persist_noclobber(original).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Build in isolation before replacing the exact executable which was launched.
+/// No shell is used, and manifest fields never become command arguments.
+pub fn install(check_only: bool, force: bool) -> AppResult<i32> {
+    let current = Version::parse(env!("CARGO_PKG_VERSION")).expect("Cargo version is valid SemVer");
+    println!("Open Pixiv Downloader 更新\n現在: v{current}");
+    let expected = if force {
+        None
+    } else {
+        let latest=check().map_err(|message|invalid(&format!("{message}\n再実行: opixiv update\nバージョン確認を省略して再インストール: opixiv update --force")))?;
+        if !latest.cmp_precedence(&current).is_gt() {
+            println!("新しいアップデートはありません（GitHub: v{latest}）。");
+            return Ok(0);
+        }
+        println!("アップデートが利用できます: v{latest}");
+        Some(latest)
+    };
+    if check_only {
+        return Ok(0);
+    }
+    require_tool("cargo")?;
+    require_tool("git")?;
+    let current_exe = std::env::current_exe()?.canonicalize()?;
+    let directory = current_exe
+        .parent()
+        .ok_or_else(|| invalid("実行ファイルの保存先が不明です。"))?;
+    let guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join(".opixiv-update.lock"))
+        .map_err(|_| {
+            invalid("更新先に書き込めません。実行ファイルの保存先の権限を確認してください。")
+        })?;
+    guard.try_lock().map_err(|_| {
+        invalid("別の更新処理が動いているか、この保存先では更新ロックを使用できません。")
+    })?;
+    let stage = tempfile::Builder::new()
+        .prefix("opixiv-update-")
+        .tempdir()?;
+    println!("更新版をビルドしています。数分かかる場合があります…");
+    let status = cargo_command(stage.path())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|_| invalid("Cargoを起動できません。現在の実行ファイルは変更していません。"))?;
+    if !status.success() {
+        return Err(invalid("更新版のビルドに失敗しました。現在の実行ファイルは変更していません。Cargoのエラーを確認し、opixiv update で再実行してください。"));
+    }
+    let candidate = candidate_path(stage.path());
+    let installed = validate_candidate(&candidate, &current, expected.as_ref())?;
+    let backup = stage.path().join("previous-opixiv");
+    std::fs::copy(&current_exe, &backup)?;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&backup)?
+        .sync_all()?;
+    if let Err(error) = self_replace::self_replace(&candidate) {
+        // On Windows the library moves the loaded image before installing the new
+        // file. Restore a missing public path if a later copy/rename failed.
+        if let Err(restore) = restore_if_missing(&current_exe, &backup) {
+            let retained = stage.keep();
+            return Err(invalid(&format!("実行ファイルの置換と復元に失敗しました: {error}; {restore}\nバックアップを保持しています: {}",retained.display())));
+        }
+        return Err(invalid(&format!("実行ファイルを置き換えられませんでした: {error}\n元の実行ファイルを保持または復元しました。他のopixivを終了し、保存先の書き込み権限を確認してください。")));
+    }
+    println!("更新しました: v{installed}\n次回は opixiv で起動してください。");
+    Ok(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn binary_version_identity_and_precedence_are_checked() {
+        assert_eq!(
+            binary_version(b"opixiv 0.2.0-alpha.10\n").unwrap(),
+            Version::parse("0.2.0-alpha.10").unwrap()
+        );
+        for bytes in [
+            b"other 1.0.0".as_slice(),
+            b"opixiv not-a-version",
+            b"opixiv 1.0.0 extra",
+            b"",
+        ] {
+            assert!(binary_version(bytes).is_err());
+        }
+    }
+    #[test]
+    fn cargo_arguments_are_fixed_and_staging_path_is_one_argument() {
+        let path = Path::new("space 日本語 & $ folder");
+        let command = cargo_command(path);
+        assert_eq!(command.get_program(), "cargo");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args.last().unwrap(), &path.as_os_str());
+        assert_eq!(args.iter().filter(|a| **a == "--root").count(), 1);
+        assert!(args.iter().any(|a| a.to_str() == Some(REPOSITORY)));
+    }
+    #[test]
+    fn rollback_restores_missing_executable_without_overwriting_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("opixiv");
+        let backup = dir.path().join("backup");
+        std::fs::write(&backup, b"working previous binary").unwrap();
+        restore_if_missing(&original, &backup).unwrap();
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            b"working previous binary"
+        );
+        std::fs::write(&original, b"another installation").unwrap();
+        restore_if_missing(&original, &backup).unwrap();
+        assert_eq!(std::fs::read(&original).unwrap(), b"another installation");
+    }
     fn manifest(version: &str) -> String {
         format!("[package]\nname = \"open-pixiv-downloader\"\nversion = \"{version}\"\n")
     }

@@ -8,7 +8,7 @@
 
 ## 更新して起動する
 
-起動中のツールを終了し、PowerShellで次の1行を実行します。リポジトリのフォルダーへ移動する必要はありません。
+alpha.6以降は `opixiv update` で更新できます。alpha.5以前の版はこのサブコマンドに未対応なので、今回だけ起動中のツールを終了し、PowerShellで次の1行を実行します。リポジトリのフォルダーへ移動する必要はありません。
 
 ```powershell
 cargo install --git https://github.com/ELRdn/Open-Pixiv-Downloader.git --branch main --locked --force

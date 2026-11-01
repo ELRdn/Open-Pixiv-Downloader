@@ -24,6 +24,12 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+      - name: Check staged self update (Linux)
+        if: runner.os == 'Linux'
+        run: python tools/check_update.py target/release/opixiv
+      - name: Check staged self update (Windows)
+        if: runner.os == 'Windows'
+        run: python tools/check_update.py target/release/opixiv.exe
       - name: Check archive compatibility (Linux)
         if: runner.os == 'Linux'
         run: python tools/check_rust_compat.py target/release/opixiv
@@ -48,5 +54,6 @@ jobs:
             target/release/opixiv.exe
             LICENSE
             NOTICE.md
+            LICENSES/
             README.md
           if-no-files-found: error

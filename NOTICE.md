@@ -33,3 +33,7 @@ as an application implementation.
 
 MIT licensing covers the code and the included synthetic fixtures. It does not
 grant rights to third-party works or permission to access external services.
+
+Self replacement uses [self-replace](https://github.com/mitsuhiko/self-replace),
+resolved to version 1.5.1 in Cargo.lock, under Apache-2.0. Its license is
+included in [LICENSES/self-replace-Apache-2.0.txt](LICENSES/self-replace-Apache-2.0.txt).

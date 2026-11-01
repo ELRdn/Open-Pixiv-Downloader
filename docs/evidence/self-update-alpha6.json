@@ -1,0 +1,67 @@
+{
+  "platform": "Linux",
+  "scope": "Offline native fake Cargo + actual self-replacement in disposable subprocesses; no remote downloads",
+  "cases": [
+    {
+      "case": "success",
+      "status": "passed",
+      "exit_code": 0,
+      "archive_untouched": true,
+      "exact_executable_path": true
+    },
+    {
+      "case": "cargo_failure_keeps_old_binary",
+      "status": "passed",
+      "exit_code": 2,
+      "archive_untouched": true,
+      "exact_executable_path": true
+    },
+    {
+      "case": "missing_binary_keeps_old_binary",
+      "status": "passed",
+      "exit_code": 2,
+      "archive_untouched": true,
+      "exact_executable_path": true
+    },
+    {
+      "case": "wrong_product_keeps_old_binary",
+      "status": "passed",
+      "exit_code": 2,
+      "archive_untouched": true,
+      "exact_executable_path": true
+    },
+    {
+      "case": "downgrade_keeps_old_binary",
+      "status": "passed",
+      "exit_code": 2,
+      "archive_untouched": true,
+      "exact_executable_path": true
+    },
+    {
+      "case": "hanging_candidate_keeps_old_binary",
+      "status": "passed",
+      "exit_code": 2,
+      "archive_untouched": true,
+      "exact_executable_path": true
+    },
+    {
+      "case": "oversized_version_keeps_old_binary",
+      "status": "passed",
+      "exit_code": 2,
+      "archive_untouched": true,
+      "exact_executable_path": true
+    }
+  ],
+  "status": "passed",
+  "version": "0.2.0-alpha.6",
+  "build": "release",
+  "rust_tests": 94,
+  "compatibility": {
+    "rust_to_python": "passed",
+    "python_to_rust": "passed",
+    "original_bytes_and_file_sets": "matched",
+    "corruption_repair": "passed"
+  },
+  "date_jst": "2026-11-01",
+  "windows": "Native implementation and CI configured; not run on this Linux host"
+}
