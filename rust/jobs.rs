@@ -29,6 +29,7 @@ pub struct Options {
     pub demo: bool,
     pub fixture: Option<PathBuf>,
     pub interval: f64,
+    pub api_interval: f64,
     pub request_budget: usize,
     pub max_file_mib: u64,
     pub retry_unavailable: bool,
@@ -49,7 +50,8 @@ impl Default for Options {
             demo: false,
             fixture: None,
             interval: 2.0,
-            request_budget: 500,
+            api_interval: 2.0,
+            request_budget: 20_000,
             max_file_mib: 256,
             retry_unavailable: false,
             balanced: false,
@@ -121,7 +123,7 @@ pub fn targets(options: &Options) -> Result<Vec<Target>> {
 /// A target snapshot is separate from per-work checkpoints: a crash cannot erase
 /// the remaining IDs, and a resume never silently refreshes an author's list.
 fn snapshot(options: &Options, refs: &[Target], source: &[String]) -> Value {
-    json!({"schema_version":1,"discovery_complete":true,"created_at":now(),"mode":if options.online {"online"}else{"fixture"},"source_targets":source,"targets":refs.iter().map(Target::label).collect::<Vec<_>>(),"types":options.types,"jobs":options.jobs,"request_budget":options.request_budget,"balanced":options.balanced,"interval":options.interval})
+    json!({"schema_version":1,"discovery_complete":true,"created_at":now(),"mode":if options.online {"online"}else{"fixture"},"source_targets":source,"targets":refs.iter().map(Target::label).collect::<Vec<_>>(),"types":options.types,"jobs":options.jobs,"request_budget":options.request_budget,"balanced":options.balanced,"interval":options.interval,"api_interval":options.api_interval})
 }
 fn resume_targets(options: &Options) -> Result<(Vec<Target>, Vec<String>)> {
     if !options.targets.is_empty() || options.input.is_some() {
@@ -188,14 +190,14 @@ pub fn run(
     emit: impl Fn(Event) + Sync,
 ) -> Result<Value> {
     let started = Instant::now();
-    if !(1..=4).contains(&options.jobs)
+    if !(1..=8).contains(&options.jobs)
         || !(1..=1000).contains(&options.limit)
         || !(1..=1024).contains(&options.max_file_mib)
         || !(1..=100_000).contains(&options.request_budget)
         || !["all", "art", "novel"].contains(&options.types.as_str())
     {
         return Err(invalid(
-            "Use jobs 1–4, limit 1–1000, request budget 1–100000, file size 1–1024 MiB",
+            "Use jobs 1–8, limit 1–1000, request budget 1–100000, file size 1–1024 MiB",
         ));
     }
     if usize::from(options.online)
@@ -225,6 +227,7 @@ pub fn run(
             options.max_file_mib * 1024 * 1024,
             stop.clone(),
             options.balanced,
+            options.api_interval,
         )?)
     } else {
         let source = if let Some(path) = &options.fixture {
@@ -758,6 +761,56 @@ fn schedule_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tag_search_plan_fetch_resume_and_incomplete_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        data["responses"]
+            ["/ajax/search/artworks/test?word=test&order=date_d&mode=safe&s_mode=s_tag_full&p=1"] =
+            json!({"illustManga":{"data":[{"id":"1001"}],"total":1}});
+        data["responses"]
+            ["/ajax/search/novels/test?word=test&order=date_d&mode=safe&s_mode=s_tag_full&p=1"] =
+            json!({"novel":{"data":[{"id":"1004"}],"total":1}});
+        let fixture = temp.path().join("search.json");
+        fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+        let options = Options {
+            targets: vec!["https://www.pixiv.net/tags/test".into(), "art:1001".into()],
+            fixture: Some(fixture),
+            out: temp.path().join("archive"),
+            all: true,
+            ..Default::default()
+        };
+        let plan = run(options.clone(), true, Arc::default(), |_| {}).unwrap();
+        assert_eq!(plan["status"], "planned");
+        assert_eq!(plan["discovered"], 2);
+        assert_eq!(plan["requests"], 2);
+        let resumed = Options {
+            targets: vec![],
+            resume: true,
+            ..options.clone()
+        };
+        let fetched = run(resumed.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(fetched["status"], "complete");
+        assert_eq!(fetched["counts"]["complete"], 2);
+        let complete = run(resumed.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(complete["requests"], 0);
+        assert_eq!(complete["already_complete"], 2);
+        let paused = run(
+            Options {
+                request_budget: 1,
+                ..options
+            },
+            true,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(paused["stop_reason"]["kind"], "request_budget");
+        assert!(run(resumed, false, Arc::default(), |_| {})
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete"));
+    }
     #[test]
     fn automatic_collection_backfills_without_redownload_and_preserves_edited_copies() {
         let temp = tempfile::tempdir().unwrap();
