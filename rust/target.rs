@@ -140,6 +140,8 @@ mod tests {
         for url in [
             "https://www.pixiv.net/tags/%E7%8C%AB/artworks?p=2&s_mode=s_tag_full",
             "https://www.pixiv.net/en/tags/C++/novels",
+            "https://www.pixiv.net/tags/%E7%8D%A3%E4%BA%BA/novels?p=2&work_lang=ja&r=1",
+            "https://www.pixiv.net/tags/test/novels?r=0",
             "https://pixiv.net/tags/test",
         ] {
             let target = Target::parse(url).unwrap();
@@ -154,6 +156,8 @@ mod tests {
             "https://www.pixiv.net/tags/test/artworks?mode=r18",
             "https://www.pixiv.net/tags/test/artworks?order=popular_d",
             "https://www.pixiv.net/tags/test/artworks?unknown=1",
+            "https://www.pixiv.net/tags/test/novels?r=2",
+            "https://www.pixiv.net/tags/test/novels?r=1&r=0",
             "https://www.pixiv.net/tags/test/artworks?p=0",
             "https://www.pixiv.net/tags/test/artworks?mode=all&mode=safe",
             "https://www.pixiv.net.evil/tags/test/artworks",

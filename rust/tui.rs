@@ -2561,6 +2561,16 @@ mod tests {
         }
     }
     #[test]
+    fn pasted_novel_search_links_with_browser_parameters_open_confirmation() {
+        let mut app = App::default();
+        app.urls.insert("https://www.pixiv.net/tags/%E7%8D%A3%E4%BA%BA/novels?p=2&work_lang=ja&r=1\nhttps://www.pixiv.net/tags/test/novels?work_lang=ja&r=1\nhttps://www.pixiv.net/tags/test\n", true);
+        let options = app.options().unwrap();
+        assert_eq!(options.targets.len(), 3);
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(app.modal == Modal::Confirm);
+        assert!(app.worker.is_none());
+    }
+    #[test]
     fn pasted_sixteen_urls_validate_and_keep_job_bound() {
         let mut app = App::default();
         app.urls.insert(

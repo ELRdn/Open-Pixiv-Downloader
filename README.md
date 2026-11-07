@@ -19,7 +19,7 @@ opixiv
 
 alpha.6以降の更新は **`opixiv update`** で行えます。以前の版を使用中なら、今回だけ上のCargoコマンドで更新してください。作業フォルダーの移動や `git pull` は不要です。リポジトリから開発・試用する場合は、cloneしたフォルダー内で `cargo run --release --locked` を使えます。Rust版の実行にPythonは必要ありません。デモ用データも実行ファイルに組み込まれています。
 
-以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.7` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
+以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.8` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
 
 ## 操作
 
@@ -128,6 +128,8 @@ cargo run --release --locked -- fetch --resume --online --all --balanced --jobs 
 ```
 
 `/artworks`・`/illustrations`・`/manga`・`/novels` に対応し、カテゴリのない `/tags/タグ名` は画像と小説を対象にします。URLの検索条件を引き継ぎ、ページ番号だけは1から開始します。未指定ならタグ完全一致・全年齢・新しい順です。未対応の条件は無視せずエラーにします。検索側の上限・結果の変動などで総件数まで列挙できなければ停止し、全件取得済みとは扱いません。公開・全年齢と確認できる作品のみ保存します。検索一覧の取得に失敗した場合は、条件を絞って元のURLから再実行してください。
+
+小説だけを保存する場合は `https://www.pixiv.net/tags/タグ名/novels` を入力してください。ブラウザからコピーした `?work_lang=ja&r=1`、`?p=2&work_lang=ja&r=1` 付きURLにも対応します。`r=0`／`r=1` を保持し、`p=2` が付いていても全件列挙は1ページ目から始めます。末尾のないタグURLをCLIで小説だけに絞る場合は `--types novel` を指定できます。
 
 CLI・TUIの既定要求予算は20,000回です。これは作品数ではなく通信回数で、画像枚数や再試行によって消費量が変わります。`--request-budget`／F10で変更できます。詳細は[大量保存と再開](docs/BULK_DOWNLOAD_JA.md)を参照してください。
 
