@@ -37,6 +37,7 @@ pub fn validate(url: &Url) -> Result<()> {
             "order",
             "mode",
             "p",
+            "r",
             "s_mode",
             "type",
             "lang",
@@ -69,6 +70,7 @@ pub fn validate(url: &Url) -> Result<()> {
             ),
             "gs" => value == "0",
             "p" => value.parse::<u32>().is_ok_and(|n| n > 0),
+            "r" => matches!(value.as_ref(), "0" | "1"),
             _ => true,
         };
         if !valid {
@@ -282,6 +284,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn novel_search_keeps_browser_parameters_without_requesting_artworks() {
+        let client = Search {
+            pages: vec![json!({"novel":{"data":[{"id":"1004"}],"total":1}})],
+            ..Default::default()
+        };
+        let refs = discover(
+            &client,
+            "https://www.pixiv.net/tags/%E7%8D%A3%E4%BA%BA/novels?p=2&work_lang=ja&r=1",
+            "all",
+        )
+        .unwrap();
+        assert_eq!(refs[0].label(), "novel:1004");
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "/ajax/search/novels/%E7%8D%A3%E4%BA%BA");
+        for (key, value) in [("work_lang", "ja"), ("r", "1"), ("p", "1")] {
+            assert!(calls[0].1.contains(&(key.into(), value.into())));
+        }
+    }
     #[test]
     fn each_category_uses_its_own_schema_and_type_filter() {
         for (category, node, kind) in [
