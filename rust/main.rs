@@ -5,6 +5,7 @@ mod folder;
 mod jobs;
 mod media;
 mod novel;
+mod search;
 mod target;
 mod transport;
 mod tui;
@@ -61,13 +62,13 @@ enum Command {
 }
 #[derive(Args)]
 struct FetchArgs {
-    /// Work, author or novel-series URLs (also art:ID / novel:ID / user:ID / series:ID)
+    /// Work, author, novel-series or tag-search URLs (also art:ID / novel:ID / user:ID / series:ID)
     targets: Vec<String>,
     #[arg(long)]
     input: Option<PathBuf>,
     #[arg(long, default_value = "archive")]
     out: PathBuf,
-    #[arg(long,default_value_t=2,value_parser=clap::value_parser!(u8).range(1..=4))]
+    #[arg(long,default_value_t=2,value_parser=clap::value_parser!(u8).range(1..=8))]
     jobs: u8,
     #[arg(long, conflicts_with = "limit")]
     all: bool,
@@ -85,13 +86,16 @@ struct FetchArgs {
     /// Global request start interval; defaults to 2 seconds, or 1 with --balanced
     #[arg(long)]
     interval: Option<f64>,
-    /// Separate API/media timing (API >=2 seconds, global/media >=1 second)
+    /// Separate API/media timing; --interval and --api-interval accept 0.1–3600 seconds
     #[arg(long)]
     balanced: bool,
+    /// API start interval; the global --interval also applies (default: 2 seconds)
+    #[arg(long, default_value_t = 2.0)]
+    api_interval: f64,
     /// Resume the saved job targets instead of discovering the author again
     #[arg(long)]
     resume: bool,
-    #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    #[arg(long, default_value_t = 20_000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
     request_budget: u32,
     #[arg(long, default_value_t = 256)]
     max_file_mib: u64,
@@ -113,6 +117,7 @@ impl From<FetchArgs> for Options {
             demo: a.demo,
             interval: a.interval.unwrap_or(if a.balanced { 1.0 } else { 2.0 }),
             balanced: a.balanced,
+            api_interval: a.api_interval,
             resume: a.resume,
             request_budget: a.request_budget as usize,
             max_file_mib: a.max_file_mib,
@@ -211,7 +216,7 @@ mod cli_tests {
     fn profile_defaults_and_explicit_interval_are_distinct() {
         let legacy = options(&["opixiv", "fetch", "art:1", "--online"]);
         assert_eq!(legacy.interval, 2.0);
-        assert_eq!(legacy.request_budget, 500);
+        assert_eq!(legacy.request_budget, 20_000);
         assert!(!legacy.balanced);
         let balanced = options(&["opixiv", "fetch", "art:1", "--online", "--balanced"]);
         assert_eq!(balanced.interval, 1.0);
@@ -226,6 +231,25 @@ mod cli_tests {
             "3",
         ]);
         assert_eq!(explicit.interval, 3.0);
+        let fast = options(&[
+            "opixiv",
+            "fetch",
+            "art:1",
+            "--online",
+            "--balanced",
+            "--interval",
+            "0.5",
+            "--api-interval",
+            "0.5",
+            "--jobs",
+            "8",
+        ]);
+        assert_eq!(fast.interval, 0.5);
+        assert_eq!(fast.api_interval, 0.5);
+        assert_eq!(fast.jobs, 8);
+        assert!(
+            Cli::try_parse_from(["opixiv", "fetch", "art:1", "--online", "--jobs", "9"]).is_err()
+        );
     }
     #[test]
     fn resume_accepts_no_targets_and_budget_is_finite() {

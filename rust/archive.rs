@@ -113,6 +113,9 @@ fn str_at<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 pub fn discover(client: &dyn Transport, target: &Target, types: &str) -> Result<Vec<Target>> {
+    if target.kind == "search" {
+        return crate::search::discover(client, &target.id, types);
+    }
     let include = |kind: &str| types == "all" || types == kind;
     if matches!(target.kind.as_str(), "art" | "novel") {
         return Ok(if include(&target.kind) {

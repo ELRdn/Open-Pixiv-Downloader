@@ -262,7 +262,7 @@ impl Online {
         max_bytes: u64,
         stop: Arc<AtomicBool>,
     ) -> Result<Self> {
-        Self::with_profile(interval, budget, max_bytes, stop, false)
+        Self::with_profile(interval, budget, max_bytes, stop, false, 2.0)
     }
     pub fn with_profile(
         interval: f64,
@@ -270,10 +270,13 @@ impl Online {
         max_bytes: u64,
         stop: Arc<AtomicBool>,
         balanced: bool,
+        api_interval: f64,
     ) -> Result<Self> {
-        let minimum = if balanced { 1.0 } else { 2.0 };
+        let minimum = if balanced { 0.1 } else { 2.0 };
         if !interval.is_finite()
             || !(minimum..=3600.0).contains(&interval)
+            || !api_interval.is_finite()
+            || !(0.1..=3600.0).contains(&api_interval)
             || !(1..=100000).contains(&budget)
             || max_bytes == 0
         {
@@ -299,7 +302,7 @@ impl Online {
             stop,
             interval: Duration::from_secs_f64(interval),
             class_intervals: [
-                Duration::from_secs_f64(interval.max(2.0)),
+                Duration::from_secs_f64(api_interval),
                 Duration::from_secs_f64(interval),
             ],
             budget,
@@ -334,8 +337,8 @@ impl Online {
         global.max(class)
     }
     fn eligible(&self, gate: &Admission, class: usize, now: Instant) -> bool {
-        gate.active.iter().sum::<usize>() < 4
-            && gate.active[class] < [2, 4][class]
+        gate.active.iter().sum::<usize>() < 8
+            && gate.active[class] < [4, 8][class]
             && self.ready_at(gate, class, now) <= now
     }
     fn admit(&self, asset: bool) -> Result<Permit<'_>> {
@@ -887,6 +890,8 @@ mod tests {
         let api1 = client.admit(false).unwrap();
         std::thread::sleep(Duration::from_millis(18));
         let api2 = client.admit(false).unwrap();
+        let api3 = client.admit(false).unwrap();
+        let api4 = client.admit(false).unwrap();
         let c = client.clone();
         let (tx, rx) = mpsc::channel();
         let blocked = std::thread::spawn(move || {
@@ -897,16 +902,22 @@ mod tests {
         let media1 = client.admit(true).unwrap();
         std::thread::sleep(Duration::from_millis(10));
         let media2 = client.admit(true).unwrap();
-        assert_eq!(client.metrics()["active"], 4);
-        assert_eq!(client.metrics()["api_active"], 2);
+        let media3 = client.admit(true).unwrap();
+        let media4 = client.admit(true).unwrap();
+        assert_eq!(client.metrics()["active"], 8);
+        assert_eq!(client.metrics()["api_active"], 4);
         drop(api1);
         rx.recv_timeout(Duration::from_secs(1)).unwrap();
         drop(api2);
+        drop(api3);
+        drop(api4);
         drop(media1);
         drop(media2);
+        drop(media3);
+        drop(media4);
         blocked.join().unwrap();
-        assert_eq!(client.metrics()["peak_active"], 4);
-        assert_eq!(client.metrics()["peak_api_active"], 2);
+        assert_eq!(client.metrics()["peak_active"], 8);
+        assert_eq!(client.metrics()["peak_api_active"], 4);
     }
     #[test]
     fn rejection_latches_before_another_request() {
@@ -1053,6 +1064,24 @@ mod tests {
         }
     }
     #[test]
+    fn custom_intervals_preserve_global_and_api_spacing() {
+        let custom = Online::with_profile(0.1, 100, 1024, Arc::default(), true, 0.5).unwrap();
+        let start = Instant::now();
+        let gate = Admission {
+            last: Some(start),
+            class_last: [Some(start), None],
+            ..Default::default()
+        };
+        assert!(!custom.eligible(&gate, 0, start + Duration::from_millis(499)));
+        assert!(custom.eligible(&gate, 0, start + Duration::from_millis(500)));
+        assert!(!custom.eligible(&gate, 1, start + Duration::from_millis(99)));
+        assert!(custom.eligible(&gate, 1, start + Duration::from_millis(100)));
+        for value in [0.0, -1.0, 0.09, 3601.0, f64::NAN, f64::INFINITY] {
+            assert!(Online::with_profile(value, 100, 1024, Arc::default(), true, 2.0).is_err());
+            assert!(Online::with_profile(1.0, 100, 1024, Arc::default(), true, value).is_err());
+        }
+    }
+    #[test]
     fn strict_remote_origins_and_profiles() {
         for url in [
             "http://i.pximg.net/a.png",
@@ -1065,8 +1094,8 @@ mod tests {
         assert!(validate_url("https://i.pximg.net/a.png", true).is_ok());
         assert!(validate_url("https://www.pixiv.net/ajax/illust/1", false).is_ok());
         assert!(Online::new(1.0, 500, 1024, Arc::default()).is_err());
-        assert!(Online::with_profile(1.0, 20000, 1024, Arc::default(), true).is_ok());
-        assert!(Online::with_profile(1.0, 100001, 1024, Arc::default(), true).is_err());
+        assert!(Online::with_profile(1.0, 20000, 1024, Arc::default(), true, 2.0).is_ok());
+        assert!(Online::with_profile(1.0, 100001, 1024, Arc::default(), true, 2.0).is_err());
     }
     #[test]
     fn fixture_cancel_query_encoding_and_atomic_budget() {

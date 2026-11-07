@@ -321,7 +321,11 @@ struct App {
     request_budget: usize,
     active_request_budget: usize,
     balanced: bool,
+    interval: f64,
+    api_interval: f64,
     settings_budget: Editor,
+    settings_interval: Editor,
+    settings_api_interval: Editor,
     settings_balanced: bool,
     settings_focus: usize,
     settings_error: Option<String>,
@@ -362,9 +366,13 @@ impl Default for App {
             jobs: 2,
             request_budget: 20_000,
             active_request_budget: 20_000,
-            balanced: false,
+            balanced: true,
+            interval: 1.0,
+            api_interval: 2.0,
             settings_budget: Editor::new("20000"),
-            settings_balanced: false,
+            settings_interval: Editor::new("1"),
+            settings_api_interval: Editor::new("2"),
+            settings_balanced: true,
             settings_focus: 0,
             settings_error: None,
             confirm_resume: false,
@@ -385,7 +393,7 @@ impl Default for App {
             selected: 0,
             logs: VecDeque::from([
                 "Welcome to Open Pixiv Downloader!".into(),
-                "作品・作者・小説シリーズのURLを貼り付けてください。".into(),
+                "作品・作者・小説シリーズ・タグ検索のURLを貼り付けてください。".into(),
             ]),
             done: 0,
             total: 0,
@@ -428,6 +436,8 @@ impl App {
             return;
         }
         self.settings_budget = Editor::new(&self.request_budget.to_string());
+        self.settings_interval = Editor::new(&self.interval.to_string());
+        self.settings_api_interval = Editor::new(&self.api_interval.to_string());
         self.settings_balanced = self.balanced;
         self.settings_focus = 0;
         self.settings_error = None;
@@ -435,6 +445,21 @@ impl App {
         self.dirty = true;
     }
     fn apply_settings(&mut self) {
+        let intervals = self
+            .settings_interval
+            .value
+            .parse::<f64>()
+            .ok()
+            .zip(self.settings_api_interval.value.parse::<f64>().ok());
+        let Some((interval, api_interval)) = intervals.filter(|(global, api)| {
+            global.is_finite()
+                && api.is_finite()
+                && (0.1..=3600.0).contains(global)
+                && (0.1..=3600.0).contains(api)
+        }) else {
+            self.settings_error = Some("間隔は0.1〜3600秒で入力してください。".into());
+            return;
+        };
         match self.settings_budget.value.parse::<usize>() {
             Ok(value) if (1..=100_000).contains(&value) => {
                 self.request_budget = value;
@@ -442,10 +467,12 @@ impl App {
                     self.active_request_budget = value;
                 }
                 self.balanced = self.settings_balanced;
+                self.interval = interval;
+                self.api_interval = api_interval;
                 self.modal = Modal::None;
                 self.log(format!(
                     "設定: {} / 要求予算 {}回",
-                    profile_label(self.balanced),
+                    profile_label(self.balanced, self.interval, self.api_interval),
                     self.request_budget
                 ));
             }
@@ -455,7 +482,8 @@ impl App {
     fn settings_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.modal = Modal::None,
-            KeyCode::Tab | KeyCode::BackTab => self.settings_focus = 1 - self.settings_focus,
+            KeyCode::Tab => self.settings_focus = (self.settings_focus + 1) % 4,
+            KeyCode::BackTab => self.settings_focus = (self.settings_focus + 3) % 4,
             KeyCode::F(n @ 1..=3) => {
                 self.settings_budget = Editor::new(["500", "5000", "20000"][(n - 1) as usize]);
                 self.settings_focus = 1;
@@ -465,32 +493,34 @@ impl App {
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if self.settings_focus == 0 => {
                 self.settings_balanced = !self.settings_balanced;
             }
-            KeyCode::Char('a')
-                if self.settings_focus == 1 && key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.settings_budget = Editor::default();
-            }
-            KeyCode::Char(c)
-                if self.settings_focus == 1
-                    && c.is_ascii_digit()
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                if self.settings_budget.value.len() < 6 {
-                    self.settings_budget.key(key, false);
-                    self.settings_error = None;
+            _ if self.settings_focus > 0 => {
+                let decimal = self.settings_focus > 1;
+                let editor = match self.settings_focus {
+                    1 => &mut self.settings_budget,
+                    2 => &mut self.settings_interval,
+                    _ => &mut self.settings_api_interval,
+                };
+                match key.code {
+                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        *editor = Editor::default();
+                    }
+                    KeyCode::Char(c)
+                        if (c.is_ascii_digit() || (decimal && c == '.'))
+                            && !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                            && editor.value.len() < if decimal { 8 } else { 6 } =>
+                    {
+                        editor.key(key, false);
+                    }
+                    KeyCode::Backspace
+                    | KeyCode::Delete
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Home
+                    | KeyCode::End => editor.key(key, false),
+                    _ => {}
                 }
-            }
-            KeyCode::Backspace
-            | KeyCode::Delete
-            | KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Home
-            | KeyCode::End
-                if self.settings_focus == 1 =>
-            {
-                self.settings_budget.key(key, false);
                 self.settings_error = None;
             }
             _ => {}
@@ -788,7 +818,9 @@ impl App {
             .map(str::to_owned)
             .collect();
         if !resume && (values.is_empty() || values.len() > 1000) {
-            return Err(invalid("作品・作者URLを1〜1000件入力してください。"));
+            return Err(invalid(
+                "作品・作者・タグ検索URLを1〜1000件入力してください。",
+            ));
         }
         if !resume {
             for v in &values {
@@ -801,7 +833,12 @@ impl App {
         Ok(Options {
             targets: if resume { vec![] } else { values },
             balanced: self.balanced,
-            interval: if self.balanced { 1.0 } else { 2.0 },
+            interval: if self.balanced { self.interval } else { 2.0 },
+            api_interval: if self.balanced {
+                self.api_interval
+            } else {
+                2.0
+            },
             request_budget: self.request_budget,
             resume,
             out: PathBuf::from(self.out.value.trim()),
@@ -1263,8 +1300,8 @@ impl App {
                     KeyCode::Left | KeyCode::Char('-') => {
                         self.jobs = self.jobs.saturating_sub(1).max(1)
                     }
-                    KeyCode::Right | KeyCode::Char('+') => self.jobs = (self.jobs + 1).min(4),
-                    KeyCode::Char(c) if ('1'..='4').contains(&c) => {
+                    KeyCode::Right | KeyCode::Char('+') => self.jobs = (self.jobs + 1).min(8),
+                    KeyCode::Char(c) if ('1'..='8').contains(&c) => {
                         self.jobs = c.to_digit(10).unwrap() as usize
                     }
                     _ => {}
@@ -1292,6 +1329,11 @@ impl App {
                     }
                     if budget.contains(point) {
                         self.settings_focus = 1;
+                    }
+                    for (i, rect) in interval_controls(popup).iter().enumerate() {
+                        if rect.contains(point) {
+                            self.settings_focus = i + 2;
+                        }
                     }
                     for (i, rect) in presets.iter().enumerate() {
                         if rect.contains(point) {
@@ -1526,11 +1568,11 @@ fn resume_button(footer: Rect) -> Option<Rect> {
     let x = settings.right() + 1;
     (x + width <= footer.right()).then_some(Rect::new(x, settings.y, width, 1))
 }
-fn profile_label(balanced: bool) -> &'static str {
+fn profile_label(balanced: bool, interval: f64, api_interval: f64) -> String {
     if balanced {
-        "分離: 全体1秒/API2秒/媒体1秒"
+        format!("分離: 全体{interval}秒/API{api_interval}秒/媒体{interval}秒")
     } else {
-        "互換: 全通信2秒間隔"
+        "互換: 全通信2秒間隔".into()
     }
 }
 fn stop_label(value: &Value) -> String {
@@ -1599,16 +1641,22 @@ fn settings_controls(popup: Rect) -> (Rect, Rect, Rect, [Rect; 3], Rect) {
         Rect::new(popup.x + x, popup.y + y, width, height).intersection(inner)
     };
     (
-        control(2, 3, 12, 1),
-        control(17, 3, UnicodeWidthStr::width(BALANCED_BUTTON) as u16, 1),
-        control(2, 5, popup.width.saturating_sub(4), 3),
+        control(2, 2, 12, 1),
+        control(17, 2, UnicodeWidthStr::width(BALANCED_BUTTON) as u16, 1),
+        control(2, 3, popup.width.saturating_sub(4), 3),
         [
-            control(2, 9, 10, 1),
-            control(13, 9, 11, 1),
-            control(25, 9, 12, 1),
+            control(2, 6, 10, 1),
+            control(13, 6, 11, 1),
+            control(25, 6, 12, 1),
         ],
         control(2, 13, 14, 1),
     )
+}
+fn interval_controls(popup: Rect) -> [Rect; 2] {
+    let area = Rect::new(popup.x + 2, popup.y + 7, popup.width.saturating_sub(4), 3)
+        .intersection(popup.inner(ratatui::layout::Margin::new(1, 1)));
+    let fields = Layout::horizontal([Constraint::Percentage(50); 2]).split(area);
+    [fields[0], fields[1]]
 }
 fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
     frame.render_widget(Clear, popup);
@@ -1645,9 +1693,26 @@ fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
             rect,
         );
     }
+    let [global, api] = interval_controls(popup);
+    editor(
+        frame,
+        global,
+        &app.settings_interval,
+        "全体・媒体 秒",
+        app.settings_focus == 2,
+        "",
+    );
+    editor(
+        frame,
+        api,
+        &app.settings_api_interval,
+        "API 秒",
+        app.settings_focus == 3,
+        "",
+    );
     frame.render_widget(
-        Paragraph::new(profile_label(app.settings_balanced)).style(Style::default().fg(MUTED)),
-        row(4),
+        Paragraph::new("秒数は分離時に適用 · 0.1〜3600秒").style(Style::default().fg(MUTED)),
+        row(10),
     );
     editor(
         frame,
@@ -2017,7 +2082,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         }
         frame.render_widget(Clear, popup);
         let text = if app.modal == Modal::Help {
-            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 通信と要求予算 / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n一覧取得が未完了なら再開せず、元のURLでもう一度確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜4\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
+            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者・タグ検索URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 通信と要求予算 / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n一覧取得が未完了なら再開せず、元のURLでもう一度確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜8\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
         } else if app.modal == Modal::Collection {
             app.collection_details()
         } else if app.modal == Modal::Update {
@@ -2025,7 +2090,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         } else if app.modal == Modal::Result {
             app.summary()
         } else {
-            format!("{}\n\n対象: {}\n保存先: {}\n並行保存: {}作品\n通信: {}\n要求予算: {}回（F10で変更）\n\n{}\n\nEnter: 保存開始    Esc: 入力へ戻る",if app.demo{"合成データを保存します · 通信なし"}else{"Pixivへ匿名で接続します"},if app.confirm_resume { "最新の保存対象一覧から再開（job / plan）".into() }else{format!("入力{}件（作者URLは作品一覧へ展開）",app.urls.value.split_whitespace().count())},clean(&app.out.value),app.jobs,profile_label(app.balanced),app.request_budget,if app.demo{"デモ保存は実作品の取得を検証するものではありません。"}else{"拒否応答では新規要求を停止します。予算到達時は進行中の正常な保存を確定します。"})
+            format!("{}\n\n対象: {}\n保存先: {}\n並行保存: {}作品\n通信: {}\n要求予算: {}回（F10で変更）\n\n{}\n\nEnter: 保存開始    Esc: 入力へ戻る",if app.demo{"合成データを保存します · 通信なし"}else{"Pixivへ匿名で接続します"},if app.confirm_resume { "最新の保存対象一覧から再開（job / plan）".into() }else{format!("入力{}件（作者・タグ検索URLは作品一覧へ展開）",app.urls.value.split_whitespace().count())},clean(&app.out.value),app.jobs,profile_label(app.balanced, app.interval, app.api_interval),app.request_budget,if app.demo{"デモ保存は実作品の取得を検証するものではありません。"}else{"拒否応答では新規要求を停止します。予算到達時は進行中の正常な保存を確定します。"})
         };
         frame.render_widget(
             Paragraph::new(text)
@@ -2149,11 +2214,13 @@ mod tests {
     fn settings_validate_budget_and_apply_only_on_enter() {
         let mut app = App::default();
         assert_eq!(app.request_budget, 20_000);
-        assert!(!app.balanced);
+        assert!(app.balanced);
         app.key(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE));
         assert!(app.modal == Modal::Settings);
         app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        assert!(!app.balanced);
+        assert!(app.balanced);
+        assert!(!app.settings_balanced);
+        app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         app.key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
@@ -2181,6 +2248,31 @@ mod tests {
         assert_eq!(app.request_budget, 5000);
     }
     #[test]
+    fn custom_intervals_are_validated_before_settings_are_applied() {
+        let mut app = App::default();
+        app.open_settings();
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        for c in "0.5".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        app.settings_budget = Editor::new("10");
+        app.apply_settings();
+        assert!(app.modal == Modal::Settings);
+        assert_eq!(app.request_budget, 20_000);
+        assert_eq!(app.interval, 1.0);
+        app.settings_api_interval = Editor::new("0.5");
+        app.apply_settings();
+        let options = app.options_for(true).unwrap();
+        assert_eq!(options.interval, 0.5);
+        assert_eq!(options.api_interval, 0.5);
+        assert_eq!(options.request_budget, 10);
+    }
+    #[test]
     fn settings_mouse_and_small_screen_keep_controls_available() {
         for (width, height) in [(40, 18), (80, 24), (120, 36)] {
             let mut app = App::default();
@@ -2188,6 +2280,19 @@ mod tests {
             let area = Rect::new(0, 0, width, height);
             let popup = popup_rect(View::new(area).unwrap().body, &app.modal);
             let (_, balanced, _, presets, apply) = settings_controls(popup);
+            for (i, rect) in interval_controls(popup).iter().enumerate() {
+                assert!(rect.height >= 3 && rect.width > 0);
+                app.mouse(
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: rect.x,
+                        row: rect.y,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    area,
+                );
+                assert_eq!(app.settings_focus, i + 2);
+            }
             for rect in [balanced, presets[0], apply] {
                 app.mouse(
                     MouseEvent {
@@ -2472,7 +2577,7 @@ mod tests {
         for _ in 0..10 {
             app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         }
-        assert_eq!(app.jobs, 4);
+        assert_eq!(app.jobs, 8);
     }
     #[test]
     fn demo_switch_keeps_online_urls_and_destination() {

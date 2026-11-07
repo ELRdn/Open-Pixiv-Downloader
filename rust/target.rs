@@ -42,6 +42,15 @@ impl Target {
         {
             return Err(invalid("Use a canonical HTTPS Pixiv URL"));
         }
+        if u.path().starts_with("/tags/") || u.path().starts_with("/en/tags/") {
+            crate::search::validate(&u)?;
+            let mut u = u;
+            u.set_fragment(None);
+            return Ok(Self {
+                kind: "search".into(),
+                id: u.to_string(),
+            });
+        }
         let path = u
             .path()
             .strip_prefix("/en/")
@@ -62,15 +71,23 @@ impl Target {
                 return Self::new("novel", &ids[0].1);
             }
         }
-        Err(invalid("Use a work, author or novel-series URL"))
+        Err(invalid(
+            "Use a work, author, novel-series or tag-search URL",
+        ))
     }
     pub fn key(&self) -> String {
         format!("{}_{}", self.kind, self.id)
     }
     pub fn label(&self) -> String {
+        if self.kind == "search" {
+            return self.id.clone();
+        }
         format!("{}:{}", self.kind, self.id)
     }
     pub fn url(&self) -> String {
+        if self.kind == "search" {
+            return self.id.clone();
+        }
         if self.kind == "novel" {
             format!("https://www.pixiv.net/novel/show.php?id={}", self.id)
         } else {
@@ -116,6 +133,32 @@ mod tests {
             "https://www.pixiv.net/novel/show.php?id=1&id=2",
         ] {
             assert!(Target::parse(v).is_err(), "{v}");
+        }
+    }
+    #[test]
+    fn search_urls_round_trip_and_reject_unsupported_filters() {
+        for url in [
+            "https://www.pixiv.net/tags/%E7%8C%AB/artworks?p=2&s_mode=s_tag_full",
+            "https://www.pixiv.net/en/tags/C++/novels",
+            "https://pixiv.net/tags/test",
+        ] {
+            let target = Target::parse(url).unwrap();
+            assert_eq!(target.kind, "search");
+            assert_eq!(Target::parse(&target.label()).unwrap(), target);
+            assert_eq!(target.url(), target.label());
+        }
+        for url in [
+            "https://www.pixiv.net/tags//artworks",
+            "https://www.pixiv.net/tags/test/users",
+            "https://www.pixiv.net/tags/test/novels?gs=1",
+            "https://www.pixiv.net/tags/test/artworks?mode=r18",
+            "https://www.pixiv.net/tags/test/artworks?order=popular_d",
+            "https://www.pixiv.net/tags/test/artworks?unknown=1",
+            "https://www.pixiv.net/tags/test/artworks?p=0",
+            "https://www.pixiv.net/tags/test/artworks?mode=all&mode=safe",
+            "https://www.pixiv.net.evil/tags/test/artworks",
+        ] {
+            assert!(Target::parse(url).is_err(), "{url}");
         }
     }
 }

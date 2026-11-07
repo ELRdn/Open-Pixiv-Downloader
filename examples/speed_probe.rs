@@ -12,6 +12,8 @@ mod jobs;
 mod media;
 #[path = "../rust/novel.rs"]
 mod novel;
+#[path = "../rust/search.rs"]
+mod search;
 #[path = "../rust/target.rs"]
 mod target;
 mod transport {
