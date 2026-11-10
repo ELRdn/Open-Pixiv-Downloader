@@ -7,6 +7,7 @@ pub enum StopReason {
     RequestBudget,
     HttpStatus { status: u16 },
     UnexpectedContent,
+    SearchIncomplete,
     WorkerError,
     DiskError,
 }

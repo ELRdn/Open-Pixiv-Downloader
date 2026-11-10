@@ -1,9 +1,9 @@
 use crate::{
-    archive::{atomic, discover, fingerprint, now, safe_path, Archive, SharedArchive},
+    archive::{atomic, fingerprint, now, safe_path, Archive, SharedArchive},
     collection,
     error::{invalid, Error, Result, StopReason},
     media::SharedMedia,
-    target::Target,
+    target::{Target, MAX_WORKS},
     transport::{Fixture, Online, Transport, DEMO},
 };
 use serde_json::{json, Value};
@@ -123,9 +123,22 @@ pub fn targets(options: &Options) -> Result<Vec<Target>> {
 /// A target snapshot is separate from per-work checkpoints: a crash cannot erase
 /// the remaining IDs, and a resume never silently refreshes an author's list.
 fn snapshot(options: &Options, refs: &[Target], source: &[String]) -> Value {
-    json!({"schema_version":1,"discovery_complete":true,"created_at":now(),"mode":if options.online {"online"}else{"fixture"},"source_targets":source,"targets":refs.iter().map(Target::label).collect::<Vec<_>>(),"types":options.types,"jobs":options.jobs,"request_budget":options.request_budget,"balanced":options.balanced,"interval":options.interval,"api_interval":options.api_interval})
+    json!({"schema_version":1,"discovery_complete":true,"discovery_resumable":false,"created_at":now(),"mode":if options.online {"online"}else{"fixture"},"source_targets":source,"targets":refs.iter().map(Target::label).collect::<Vec<_>>(),"all":options.all,"limit":options.limit,"types":options.types,"jobs":options.jobs,"request_budget":options.request_budget,"balanced":options.balanced,"interval":options.interval,"api_interval":options.api_interval})
 }
-fn resume_targets(options: &Options) -> Result<(Vec<Target>, Vec<String>)> {
+#[derive(Debug)]
+struct SavedSelection {
+    refs: Vec<Target>,
+    sources: Vec<String>,
+    pending: Option<PendingDiscovery>,
+}
+#[derive(Debug)]
+struct PendingDiscovery {
+    generation: String,
+    all: bool,
+    limit: usize,
+    types: String,
+}
+fn resume_targets(options: &Options) -> Result<SavedSelection> {
     if !options.targets.is_empty() || options.input.is_some() {
         return Err(invalid(
             "--resume uses saved targets; do not supply URLs or --input",
@@ -141,21 +154,22 @@ fn resume_targets(options: &Options) -> Result<(Vec<Target>, Vec<String>)> {
     } else {
         job
     };
-    if fs::metadata(&path)?.len() > 16 * 1024 * 1024 {
-        return Err(invalid("Saved job exceeds 16 MiB"));
+    if fs::metadata(&path)?.len() > 64 * 1024 * 1024 {
+        return Err(invalid("Saved job exceeds 64 MiB"));
     }
     let v: Value = serde_json::from_slice(&fs::read(path)?)?;
     if v["schema_version"] != 1 || v["mode"] != if options.online { "online" } else { "fixture" } {
         return Err(invalid("Saved job format or online/fixture mode differs"));
     }
-    if v["discovery_complete"] != true {
+    let complete = v["discovery_complete"] == true;
+    if !complete && (v["discovery_complete"] != false || v["discovery_resumable"] != true) {
         return Err(invalid("Saved selection is incomplete; run the source URLs again instead of resuming an older job"));
     }
     let items = v["targets"]
         .as_array()
         .ok_or_else(|| invalid("Invalid saved targets"))?;
-    if items.len() > 100_000 {
-        return Err(invalid("Saved job exceeds 100000 works"));
+    if items.len() > MAX_WORKS {
+        return Err(invalid("Saved job exceeds 1000000 works"));
     }
     let refs = items
         .iter()
@@ -171,20 +185,66 @@ fn resume_targets(options: &Options) -> Result<(Vec<Target>, Vec<String>)> {
     if refs.iter().any(|t| !seen.insert(t.clone())) {
         return Err(invalid("Duplicate saved target"));
     }
-    let sources = v["source_targets"]
-        .as_array()
-        .map(|v| {
-            v.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
+    let sources = match v.get("source_targets") {
+        None if complete => Vec::new(),
+        Some(Value::Array(sources)) => sources
+            .iter()
+            .map(|source| {
+                source
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid("Invalid saved source target"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => return Err(invalid("Invalid saved source targets")),
+    };
+    let pending = if complete {
+        None
+    } else {
+        if !refs.is_empty() || !(1..=1000).contains(&sources.len()) {
+            return Err(invalid(
+                "Incomplete selection requires empty targets and 1–1000 saved source URLs",
+            ));
+        }
+        for source in &sources {
+            Target::parse(source)?;
+        }
+        let generation = v["discovery_generation"]
+            .as_str()
+            .filter(|generation| {
+                (1..=128).contains(&generation.len())
+                    && generation
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b".:+-".contains(&c))
+            })
+            .ok_or_else(|| invalid("Invalid or missing incomplete discovery generation"))?;
+        let types = v["types"]
+            .as_str()
+            .filter(|types| ["all", "art", "novel"].contains(types))
+            .ok_or_else(|| invalid("Invalid incomplete discovery types"))?;
+        let all = v["all"]
+            .as_bool()
+            .ok_or_else(|| invalid("Invalid incomplete discovery all flag"))?;
+        let limit = v["limit"]
+            .as_u64()
+            .filter(|limit| (1..=1000).contains(limit))
+            .ok_or_else(|| invalid("Invalid incomplete discovery limit"))?;
+        Some(PendingDiscovery {
+            generation: generation.into(),
+            all,
+            limit: limit as usize,
+            types: types.into(),
         })
-        .unwrap_or_default();
-    Ok((refs, sources))
+    };
+    Ok(SavedSelection {
+        refs,
+        sources,
+        pending,
+    })
 }
 
 pub fn run(
-    options: Options,
+    mut options: Options,
     plan: bool,
     stop: Arc<AtomicBool>,
     emit: impl Fn(Event) + Sync,
@@ -209,13 +269,13 @@ pub fn run(
             "Choose exactly one of --online, --demo or --fixture",
         ));
     }
-    // Validate all external input before creating any archive files.
-    let resumed = if options.resume {
-        Some(resume_targets(&options)?)
-    } else {
-        None
-    };
-    let input = if options.resume {
+    // Fresh input must be valid before creating an archive; saved input needs its lock.
+    let mut input = if options.resume {
+        if !options.targets.is_empty() || options.input.is_some() {
+            return Err(invalid(
+                "--resume uses saved targets; do not supply URLs or --input",
+            ));
+        }
         Vec::new()
     } else {
         targets(&options)?
@@ -243,16 +303,48 @@ pub fn run(
     };
     let client: Arc<dyn Transport> =
         Arc::new(SharedMedia::new(inner, options.max_file_mib * 1024 * 1024)?);
-    let archive = Arc::new(Archive::open(&options.out, false)?);
+    let archive = Arc::new(Archive::open(&options.out, options.resume)?);
+    let resumed = if options.resume {
+        Some(resume_targets(&options)?)
+    } else {
+        None
+    };
+    if let Some(saved) = &resumed {
+        if let Some(pending) = &saved.pending {
+            options.all = pending.all;
+            options.limit = pending.limit;
+            options.types = pending.types.clone();
+            input = saved
+                .sources
+                .iter()
+                .map(|source| Target::parse(source))
+                .collect::<Result<Vec<_>>>()?;
+        }
+    }
+    let discovery_complete = resumed
+        .as_ref()
+        .is_some_and(|saved| saved.pending.is_none());
+    let generation = resumed
+        .as_ref()
+        .and_then(|saved| saved.pending.as_ref())
+        .map(|pending| pending.generation.clone())
+        .unwrap_or_else(|| format!("{}-{}", now(), std::process::id()));
     emit(Event::ArchiveOpened(archive.root.clone()));
     let sources: Vec<String> = resumed
         .as_ref()
-        .map(|(_, s)| s.clone())
+        .map(|saved| saved.sources.clone())
         .unwrap_or_else(|| input.iter().map(Target::label).collect());
     let mut report = json!({"tool_version":env!("CARGO_PKG_VERSION"),"started_at":now(),"mode":if options.online{"anonymous_online_unvalidated"}else{"synthetic_offline"},"targets":sources,"target":if sources.len()==1 {sources[0].clone()}else{"batch".into()},"jobs":options.jobs,"limit":if options.all{Value::Null}else{json!(options.limit)},"resumed":options.resume,"request_budget":options.request_budget,"balanced":options.balanced,"status":"running","results":[],"body_ready_count":0,"full_complete_count":0,"stop_reason":Value::Null});
+    report["discovery_complete"] = json!(discovery_complete);
+    report["discovery_resumable"] = json!(!discovery_complete);
+    report["selected"] = json!(0);
+    report["previous_exclusions"] = json!(0);
+    report["deferred_by_limit"] = json!(0);
     let mut collected = collection::Report::default();
     emit(Event::Message(
-        if options.resume {
+        if options.resume && !discovery_complete {
+            "保存済みの列挙結果を再利用して、対象一覧の列挙を続けます。"
+        } else if options.resume {
             "保存した対象一覧から再開します。作者一覧は再取得しません。"
         } else {
             "対象作品を確認しています…"
@@ -263,29 +355,52 @@ pub fn run(
         // Supersede old work immediately. A failed new discovery must never
         // silently resume an unrelated old job or plan.
         let selection_path = safe_path(&archive.root, if plan { "plan.json" } else { "job.json" })?;
-        if !options.resume {
+        if !discovery_complete {
             let mut incomplete = snapshot(&options, &[], &sources);
             incomplete["discovery_complete"] = json!(false);
+            incomplete["discovery_resumable"] = json!(true);
+            incomplete["discovery_generation"] = json!(generation);
             atomic(&selection_path, &serde_json::to_vec_pretty(&incomplete)?)?;
+            archive.begin_discovery(&generation)?;
         }
         let mut refs = Vec::new();
         let mut seen = HashSet::new();
-        if let Some((saved, _)) = resumed {
-            refs = saved;
+        if discovery_complete {
+            refs = resumed.unwrap().refs;
         } else {
             for target in &input {
-                for r in discover(client.as_ref(), target, &options.types)? {
+                let mut progress = |message| {
+                    emit(Event::Message(message));
+                    emit(Event::Metrics(
+                        json!({"requests":client.requests(),"request_budget":options.request_budget,"transport":client.metrics()}),
+                    ));
+                };
+                let discovered = archive.discover_target(
+                    client.as_ref(),
+                    target,
+                    &options.types,
+                    options.online,
+                    &generation,
+                    &mut progress,
+                )?;
+                for r in discovered {
                     if seen.insert(r.clone()) {
                         refs.push(r);
+                        if refs.len() > MAX_WORKS {
+                            return Err(invalid(
+                                "Discovered more than 1000000 works; narrow selection",
+                            ));
+                        }
                     }
                 }
             }
         }
-        if refs.len() > 100_000 {
+        if refs.len() > MAX_WORKS {
             return Err(invalid(
-                "Discovered more than 100000 works; narrow selection",
+                "Discovered more than 1000000 works; narrow selection",
             ));
         }
+        let saved_refs = discovery_complete.then(|| refs.clone());
         report["discovered"] = json!(refs.len());
         let mut remaining = Vec::new();
         let mut existing = Vec::new();
@@ -329,11 +444,23 @@ pub fn run(
             })
             .map(|(_, r)| r)
             .collect();
-        let mut intended = existing.clone();
-        intended.extend(selected.iter().cloned());
-        intended.extend(excluded_targets);
+        let intended = saved_refs.unwrap_or_else(|| {
+            let mut intended = existing.clone();
+            intended.extend(selected.iter().cloned());
+            intended.extend(excluded_targets);
+            intended
+        });
         let record = snapshot(&options, &intended, &sources);
-        atomic(&selection_path, &serde_json::to_vec_pretty(&record)?)?;
+        let saved = serde_json::to_vec_pretty(&record)?;
+        if saved.len() > 64 * 1024 * 1024 {
+            return Err(invalid("Saved job exceeds 64 MiB"));
+        }
+        atomic(&selection_path, &saved)?;
+        report["discovery_complete"] = json!(true);
+        report["discovery_resumable"] = json!(false);
+        if !discovery_complete {
+            archive.finish_discovery(&generation)?;
+        }
         report["already_complete"] = json!(existing.len());
         report["previous_exclusions"] = json!(excluded);
         report["selected"] = json!(selected.len());
@@ -395,6 +522,9 @@ pub fn run(
             Error::Budget => StopReason::RequestBudget,
             Error::Stop(_) => client.stop_reason().unwrap_or(StopReason::UserCancel),
             Error::Io(_) | Error::Sql(_) => StopReason::DiskError,
+            Error::Invalid(_) if report["discovery_complete"] != true => {
+                StopReason::SearchIncomplete
+            }
             _ => StopReason::WorkerError,
         };
         report["stop_reason"] = json!(reason);
@@ -404,6 +534,17 @@ pub fn run(
             "failed"
         });
         report["reason"] = json!(e.to_string());
+        if report["discovery_complete"] == false && !matches!(e, Error::Budget | Error::Stop(_)) {
+            report["discovery_resumable"] = json!(false);
+            let mut incomplete = snapshot(&options, &[], &sources);
+            incomplete["discovery_complete"] = json!(false);
+            incomplete["discovery_resumable"] = json!(false);
+            incomplete["discovery_generation"] = json!(generation);
+            atomic(
+                &safe_path(&archive.root, if plan { "plan.json" } else { "job.json" })?,
+                &serde_json::to_vec_pretty(&incomplete)?,
+            )?;
+        }
     }
     if !plan {
         if let Err(e) = collected.write(&archive.root) {
@@ -501,6 +642,10 @@ fn schedule_core(
     let mut failure: Option<Error> = None;
     let mut body_keys = HashSet::new();
     let mut full = existing.len();
+    let existing_novels = existing
+        .iter()
+        .filter(|target| target.kind == "novel")
+        .count();
     let mut last_metrics = Instant::now();
     let mut prepare_seconds = 0.0;
     let mut assets_seconds = 0.0;
@@ -705,7 +850,7 @@ fn schedule_core(
             }
             if last_metrics.elapsed() >= Duration::from_millis(200) {
                 emit(Event::Metrics(
-                    json!({"requests":client.requests(),"request_budget":budget,"body_ready":body_keys.len()+existing.iter().filter(|t|t.kind=="novel").count(),"complete":full,"transport":client.metrics()}),
+                    json!({"requests":client.requests(),"request_budget":budget,"body_ready":body_keys.len()+existing_novels,"complete":full,"transport":client.metrics()}),
                 ));
                 last_metrics = Instant::now();
             }
@@ -737,8 +882,7 @@ fn schedule_core(
             collected.merge(r);
         }
         report["stage_seconds"] = json!({"prepare_sum":prepare_seconds,"assets_sum":assets_seconds,"collection_sum":collection_seconds});
-        report["body_ready_count"] =
-            json!(body_keys.len() + existing.iter().filter(|t| t.kind == "novel").count());
+        report["body_ready_count"] = json!(body_keys.len() + existing_novels);
         report["full_complete_count"] = json!(full);
         emit(Event::Metrics(
             json!({"requests":client.requests(),"request_budget":budget,"body_ready":report["body_ready_count"],"complete":full,"transport":client.metrics()}),
@@ -761,6 +905,293 @@ fn schedule_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selection_above_100000_is_saved_and_resumed_without_network() {
+        let temp = tempfile::tempdir().unwrap();
+        let refs = (1..=164_000)
+            .map(|id| Target::new("novel", &id.to_string()).unwrap())
+            .collect::<Vec<_>>();
+        let options = Options {
+            demo: true,
+            out: temp.path().into(),
+            resume: true,
+            ..Default::default()
+        };
+        let record = snapshot(
+            &options,
+            &refs,
+            &["https://www.pixiv.net/tags/test/novels".into()],
+        );
+        let path = temp.path().join("job.json");
+        atomic(&path, &serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+        let saved = resume_targets(&options).unwrap();
+        assert!(saved.pending.is_none());
+        assert_eq!(saved.refs.len(), 164_000);
+        assert_eq!(saved.refs.first(), refs.first());
+        assert_eq!(saved.refs.last(), refs.last());
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(resume_targets(&options)
+            .unwrap_err()
+            .to_string()
+            .contains("64 MiB"));
+    }
+    #[test]
+    fn pending_discovery_rejects_malformed_scope_but_accepts_complete_legacy() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = Options {
+            demo: true,
+            out: temp.path().into(),
+            resume: true,
+            ..Default::default()
+        };
+        let mut record = snapshot(&options, &[], &["user:9001".into()]);
+        record["discovery_complete"] = json!(false);
+        record["discovery_resumable"] = json!(true);
+        record["discovery_generation"] = json!("2026-11-11T00:00:00.123+00:00-123");
+        let path = temp.path().join("job.json");
+        atomic(&path, &serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(resume_targets(&options).unwrap().pending.is_some());
+        for (field, value) in [
+            ("source_targets", Value::Null),
+            ("source_targets", json!("user:9001")),
+            ("source_targets", json!([])),
+            ("source_targets", json!(["user:9001", 1])),
+            ("source_targets", json!(["https://evil.example/a"])),
+            ("source_targets", json!(vec!["user:9001"; 1001])),
+            ("targets", json!(["art:1001"])),
+            ("discovery_resumable", json!(false)),
+            ("discovery_resumable", json!("true")),
+            ("discovery_complete", Value::Null),
+            ("discovery_generation", Value::Null),
+            ("discovery_generation", json!("")),
+            ("discovery_generation", json!("a".repeat(129))),
+            ("discovery_generation", json!("../old/job")),
+            ("discovery_generation", json!("old_generation")),
+            ("discovery_generation", json!("old generation")),
+            ("discovery_generation", json!("世代1")),
+            ("types", Value::Null),
+            ("types", json!("video")),
+            ("all", Value::Null),
+            ("all", json!("true")),
+            ("limit", Value::Null),
+            ("limit", json!(0)),
+            ("limit", json!(1001)),
+            ("limit", json!(1.5)),
+            ("limit", json!("1")),
+        ] {
+            let mut invalid = record.clone();
+            invalid[field] = value;
+            atomic(&path, &serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(
+                resume_targets(&options).is_err(),
+                "accepted {field}: {invalid}"
+            );
+        }
+        record
+            .as_object_mut()
+            .unwrap()
+            .remove("discovery_generation");
+        atomic(&path, &serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(resume_targets(&options).is_err());
+        record["discovery_complete"] = json!(true);
+        record["targets"] = json!(["art:1001"]);
+        for field in ["all", "limit", "discovery_resumable", "source_targets"] {
+            record.as_object_mut().unwrap().remove(field);
+        }
+        atomic(&path, &serde_json::to_vec(&record).unwrap()).unwrap();
+        let saved = resume_targets(&options).unwrap();
+        assert!(saved.pending.is_none());
+        assert_eq!(saved.refs, vec![Target::parse("art:1001").unwrap()]);
+        record["source_targets"] = json!(["user:9001", false]);
+        atomic(&path, &serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(resume_targets(&options).is_err());
+    }
+    #[test]
+    fn mixed_user_search_budget_one_resumes_with_original_scope() {
+        for all in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut data: Value = serde_json::from_str(DEMO).unwrap();
+            let user = "/ajax/user/9001/profile/all";
+            let art =
+                "/ajax/search/artworks/test?word=test&order=date_d&mode=safe&s_mode=s_tag_full&p=1";
+            let novel =
+                "/ajax/search/novels/test?word=test&order=date_d&mode=safe&s_mode=s_tag_full&p=1";
+            data["responses"][user] = json!({"illusts":{"1003":null},"manga":{},"novels":{}});
+            data["responses"][art] = json!({"illustManga":{"data":[{"id":"1001"}],"total":1}});
+            data["responses"][novel] = json!({"novel":{"data":[{"id":"1004"}],"total":1}});
+            let fixture = temp.path().join("fixture.json");
+            fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+            let options = Options {
+                targets: vec!["user:9001".into(), "https://www.pixiv.net/tags/test".into()],
+                fixture: Some(fixture.clone()),
+                out: temp.path().join("archive"),
+                all,
+                limit: 1,
+                request_budget: 1,
+                ..Default::default()
+            };
+            let first = run(options.clone(), true, Arc::default(), |_| {}).unwrap();
+            assert_eq!(first["status"], "paused");
+            assert_eq!(first["requests"], 1);
+            assert_eq!(first["discovery_resumable"], true);
+            let path = options.out.join("plan.json");
+            let pending: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let generation = pending["discovery_generation"].clone();
+            assert_eq!(pending["targets"], json!([]));
+            data["responses"][user]["illusts"] = json!({"1002":null});
+            fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+            let resumed = Options {
+                targets: vec![],
+                resume: true,
+                all: !all,
+                limit: 1000,
+                types: "novel".into(),
+                balanced: true,
+                interval: 0.4,
+                api_interval: 0.7,
+                ..options
+            };
+            let second = run(resumed.clone(), true, Arc::default(), |_| {}).unwrap();
+            assert_eq!(second["status"], "paused");
+            assert_eq!(second["requests"], 1);
+            let pending: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(pending["discovery_generation"], generation);
+            assert_eq!(pending["all"], all);
+            assert_eq!(pending["limit"], 1);
+            assert_eq!(pending["types"], "all");
+            assert_eq!(pending["balanced"], true);
+            assert_eq!(pending["interval"], 0.4);
+            assert_eq!(pending["api_interval"], 0.7);
+            data["responses"][art]["illustManga"]["data"][0]["id"] = json!("1002");
+            fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+            let third = run(resumed, true, Arc::default(), |_| {}).unwrap();
+            assert_eq!(third["requests"], 1);
+            assert_eq!(third["status"], "planned");
+            assert_eq!(third["discovery_complete"], true);
+            assert_eq!(third["discovery_resumable"], false);
+            assert_eq!(third["discovered"], 3);
+            assert_eq!(third["limit"], if all { Value::Null } else { json!(1) });
+            assert_eq!(
+                third["selected_targets"],
+                if all {
+                    json!(["art:1003", "art:1001", "novel:1004"])
+                } else {
+                    json!(["art:1003"])
+                }
+            );
+            assert_eq!(third["deferred_by_limit"], if all { 0 } else { 2 });
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["all"], all);
+            assert_eq!(saved["limit"], 1);
+            assert_eq!(saved["types"], "all");
+        }
+    }
+    #[test]
+    fn pending_discovery_does_not_reuse_stale_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        let art =
+            "/ajax/search/artworks/test?word=test&order=date_d&mode=safe&s_mode=s_tag_full&p=1";
+        let novel =
+            "/ajax/search/novels/test?word=test&order=date_d&mode=safe&s_mode=s_tag_full&p=1";
+        data["responses"][art] = json!({"illustManga":{"data":[{"id":"1001"}],"total":1}});
+        data["responses"][novel] = json!({"novel":{"data":[{"id":"1004"}],"total":1}});
+        let fixture = temp.path().join("fixture.json");
+        fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+        let options = Options {
+            targets: vec!["https://www.pixiv.net/tags/test".into()],
+            fixture: Some(fixture.clone()),
+            out: temp.path().join("archive"),
+            all: true,
+            request_budget: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            run(options.clone(), true, Arc::default(), |_| {}).unwrap()["status"],
+            "paused"
+        );
+        let path = options.out.join("plan.json");
+        let mut pending: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        pending["discovery_generation"] = json!("new-generation");
+        atomic(&path, &serde_json::to_vec(&pending).unwrap()).unwrap();
+        data["responses"][art]["illustManga"]["data"][0]["id"] = json!("1003");
+        fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+        let resumed = Options {
+            targets: vec![],
+            resume: true,
+            ..options
+        };
+        let second = run(resumed.clone(), true, Arc::default(), |_| {}).unwrap();
+        assert_eq!(second["status"], "paused");
+        assert_eq!(second["requests"], 1);
+        let third = run(resumed, true, Arc::default(), |_| {}).unwrap();
+        assert_eq!(third["status"], "planned");
+        assert_eq!(third["requests"], 1);
+        assert_eq!(third["selected_targets"], json!(["art:1003", "novel:1004"]));
+    }
+    #[test]
+    fn fresh_search_discards_partial_cache_but_resume_reuses_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        let art =
+            "/ajax/search/artworks/test?word=test&order=date_d&mode=safe&s_mode=s_tag_full&p=1";
+        let novel =
+            "/ajax/search/novels/test?word=test&order=date_d&mode=safe&s_mode=s_tag_full&p=1";
+        data["responses"][art] = json!({"illustManga":{"data":[{"id":"1001"}],"total":1}});
+        data["responses"][novel] = json!({"novel":{"data":[{"id":"1004"}],"total":1}});
+        let fixture = temp.path().join("fixture.json");
+        fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+        let options = Options {
+            targets: vec!["https://www.pixiv.net/tags/test".into()],
+            fixture: Some(fixture.clone()),
+            out: temp.path().join("archive"),
+            all: true,
+            request_budget: 1,
+            ..Default::default()
+        };
+        let first = run(options.clone(), true, Arc::default(), |_| {}).unwrap();
+        assert_eq!(first["status"], "paused");
+        assert_eq!(first["discovery_complete"], false);
+        data["responses"][art]["illustManga"]["data"][0]["id"] = json!("1003");
+        fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+        let resumed = run(
+            Options {
+                targets: vec![],
+                resume: true,
+                ..options.clone()
+            },
+            true,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(resumed["requests"], 1);
+        assert_eq!(resumed["status"], "planned");
+        assert_eq!(
+            resumed["selected_targets"],
+            json!(["art:1001", "novel:1004"])
+        );
+        run(options.clone(), true, Arc::default(), |_| {}).unwrap();
+        data["responses"][art]["illustManga"]["data"][0]["id"] = json!("1002");
+        fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+        let fresh = run(
+            Options {
+                request_budget: 2,
+                ..options
+            },
+            true,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(fresh["requests"], 2);
+        assert_eq!(fresh["selected_targets"], json!(["art:1002", "novel:1004"]));
+    }
     #[test]
     fn tag_search_plan_fetch_resume_and_incomplete_discovery() {
         let temp = tempfile::tempdir().unwrap();
@@ -806,10 +1237,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paused["stop_reason"]["kind"], "request_budget");
-        assert!(run(resumed, false, Arc::default(), |_| {})
-            .unwrap_err()
-            .to_string()
-            .contains("incomplete"));
+        let continued = run(resumed, false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(continued["status"], "complete");
+        assert_eq!(continued["requests"], 1);
+        assert_eq!(continued["already_complete"], 2);
+        assert_eq!(continued["discovery_complete"], true);
     }
     #[test]
     fn automatic_collection_backfills_without_redownload_and_preserves_edited_copies() {
@@ -980,6 +1412,26 @@ mod tests {
         assert!(!out.exists());
     }
     #[test]
+    fn resume_requires_existing_archive_and_lock_before_reading_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = Options {
+            demo: true,
+            resume: true,
+            out: temp.path().join("never-created"),
+            ..Default::default()
+        };
+        assert!(run(options.clone(), true, Arc::default(), |_| {}).is_err());
+        assert!(!options.out.exists());
+        let archive = Archive::open(&options.out, false).unwrap();
+        fs::write(archive.root.join("job.json"), b"invalid json").unwrap();
+        let error = run(options, true, Arc::default(), |_| {}).unwrap_err();
+        assert!(error.to_string().contains("locked"), "{error}");
+        assert_eq!(
+            fs::read(archive.root.join("job.json")).unwrap(),
+            b"invalid json"
+        );
+    }
+    #[test]
     fn bounded_initial_workers_and_pre_cancelled_run() {
         let temp = tempfile::tempdir().unwrap();
         let o = Options {
@@ -1043,6 +1495,89 @@ mod tests {
         assert_eq!(resumed["status"], "complete");
     }
     #[test]
+    fn completed_resume_plan_keeps_all_saved_refs_under_current_limit() {
+        for (filename, legacy) in [("job.json", false), ("plan.json", true)] {
+            let temp = tempfile::tempdir().unwrap();
+            let options = Options {
+                demo: true,
+                resume: true,
+                out: temp.path().join("archive"),
+                ..Default::default()
+            };
+            drop(Archive::open(&options.out, false).unwrap());
+            let refs: Vec<_> = (1..=150)
+                .map(|id| Target::new("art", &id.to_string()).unwrap())
+                .collect();
+            let mut record = snapshot(
+                &Options {
+                    all: true,
+                    ..options.clone()
+                },
+                &refs,
+                &["user:9001".into()],
+            );
+            if legacy {
+                for field in ["all", "limit", "discovery_resumable"] {
+                    record.as_object_mut().unwrap().remove(field);
+                }
+            }
+            atomic(
+                &options.out.join(filename),
+                &serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            for _ in 0..2 {
+                let report = run(options.clone(), true, Arc::default(), |_| {}).unwrap();
+                assert_eq!(report["status"], "planned");
+                assert_eq!(report["discovered"], 150);
+                assert_eq!(report["selected"], 100);
+                assert_eq!(report["deferred_by_limit"], 50);
+                assert_eq!(report["limit"], 100);
+                assert_eq!(report["requests"], 0);
+                let saved: Value =
+                    serde_json::from_slice(&fs::read(options.out.join("plan.json")).unwrap())
+                        .unwrap();
+                assert_eq!(saved["targets"], record["targets"]);
+                assert_eq!(saved["all"], false);
+                assert_eq!(saved["limit"], 100);
+            }
+        }
+    }
+    #[test]
+    fn completed_resume_fetch_keeps_deferred_refs_with_small_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = Options {
+            demo: true,
+            targets: vec!["user:9001".into()],
+            all: true,
+            out: temp.path().join("archive"),
+            ..Default::default()
+        };
+        let planned = run(options.clone(), true, Arc::default(), |_| {}).unwrap();
+        assert_eq!(planned["discovered"], 4);
+        let refs = planned["selected_targets"].clone();
+        let options = Options {
+            targets: vec![],
+            resume: true,
+            all: false,
+            limit: 1,
+            jobs: 1,
+            request_budget: 1,
+            ..options
+        };
+        for _ in 0..2 {
+            let report = run(options.clone(), false, Arc::default(), |_| {}).unwrap();
+            assert_eq!(report["status"], "paused");
+            assert_eq!(report["discovered"], 4);
+            assert_eq!(report["selected"], 1);
+            assert_eq!(report["deferred_by_limit"], 3);
+            assert_eq!(report["requests"], 1);
+            let saved: Value =
+                serde_json::from_slice(&fs::read(options.out.join("job.json")).unwrap()).unwrap();
+            assert_eq!(saved["targets"], refs);
+        }
+    }
+    #[test]
     fn failed_new_discovery_never_resumes_unrelated_old_selection() {
         let temp = tempfile::tempdir().unwrap();
         let o = Options {
@@ -1063,6 +1598,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["discovery_complete"], false);
+        assert_eq!(failed["discovery_resumable"], false);
+        let marker: Value =
+            serde_json::from_slice(&fs::read(o.out.join("job.json")).unwrap()).unwrap();
+        assert_eq!(marker["discovery_resumable"], false);
+        assert!(marker["discovery_generation"].is_string());
+        assert_eq!(marker["source_targets"], json!(["user:9999"]));
+        assert_eq!(marker["all"], o.all);
+        assert_eq!(marker["limit"], o.limit);
+        assert_eq!(marker["types"], o.types);
         let error = run(
             Options {
                 targets: vec![],

@@ -254,7 +254,7 @@ impl Archive {
         drop(sentinel);
         let result = (|| {
             let db = Connection::open(safe_path(&root, "state.sqlite3")?)?;
-            db.execute_batch("CREATE TABLE IF NOT EXISTS works(kind TEXT NOT NULL,id TEXT NOT NULL,status TEXT NOT NULL,updated_at TEXT NOT NULL,reason TEXT,PRIMARY KEY(kind,id));")?;
+            db.execute_batch("CREATE TABLE IF NOT EXISTS works(kind TEXT NOT NULL,id TEXT NOT NULL,status TEXT NOT NULL,updated_at TEXT NOT NULL,reason TEXT,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS search_pages(scope TEXT NOT NULL,request TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(scope,request));")?;
             Ok(Self {
                 root,
                 db: Mutex::new(db),
@@ -269,6 +269,103 @@ impl Archive {
     }
     fn path(&self, target: &Target, name: &str) -> Result<PathBuf> {
         safe_path(&self.root, &format!("works/{}/{name}", target.key()))
+    }
+    pub fn discover_target(
+        &self,
+        client: &dyn Transport,
+        target: &Target,
+        types: &str,
+        online: bool,
+        generation: &str,
+        progress: impl FnMut(String),
+    ) -> Result<Vec<Target>> {
+        let scope = serde_json::to_string(&(generation, online, types, target.label()))?;
+        if target.kind == "search" {
+            crate::search::discover_with(
+                client,
+                &target.id,
+                types,
+                |path, query, node| {
+                    self.cached_discovery_api(client, &scope, path, query, Some(node))
+                },
+                progress,
+            )
+        } else {
+            discover(
+                &DiscoveryCache {
+                    archive: self,
+                    client,
+                    scope,
+                },
+                target,
+                types,
+            )
+        }
+    }
+    fn cached_discovery_api(
+        &self,
+        client: &dyn Transport,
+        scope: &str,
+        path: &str,
+        query: &[(&str, String)],
+        node: Option<&str>,
+    ) -> Result<Value> {
+        if client.stopped() {
+            return Err(Error::Stop("Stopped while listing targets".into()));
+        }
+        let request = serde_json::to_string(&(path, query))?;
+        let cached: Option<String> = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT body FROM search_pages WHERE scope=?1 AND request=?2",
+                params![scope, request],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(cached) = cached {
+            if cached.len() > 16 * 1024 * 1024 {
+                return Err(invalid("Saved search page exceeds 16 MiB"));
+            }
+            return Ok(serde_json::from_str(&cached)?);
+        }
+        let body = client.api(path, query)?;
+        let compact = if let Some(node) = node {
+            let page = &body[node];
+            let entries = page["data"]
+                .as_array()
+                .ok_or_else(|| invalid("Tag-search result schema changed"))?;
+            let total = page["total"]
+                .as_u64()
+                .ok_or_else(|| invalid("Missing tag-search total"))?;
+            // Resume needs only IDs and dates, not search captions or user profiles.
+            json!({node:{"total":total,"lastPage":page["lastPage"],"data":entries.iter().map(|item|
+                json!({"id":item["id"],"createDate":item["createDate"],"isAdContainer":item["isAdContainer"]})).collect::<Vec<_>>()}})
+        } else {
+            body
+        };
+        self.db.lock().unwrap().execute(
+            "INSERT INTO search_pages VALUES (?1,?2,?3)",
+            params![scope, request, serde_json::to_string(&compact)?],
+        )?;
+        Ok(compact)
+    }
+    pub fn begin_discovery(&self, generation: &str) -> Result<()> {
+        let prefix = format!("[{},", serde_json::to_string(generation)?);
+        self.db.lock().unwrap().execute(
+            "DELETE FROM search_pages WHERE substr(scope,1,?1) != ?2",
+            params![prefix.len(), prefix],
+        )?;
+        Ok(())
+    }
+    pub fn finish_discovery(&self, generation: &str) -> Result<()> {
+        let prefix = format!("[{},", serde_json::to_string(generation)?);
+        self.db.lock().unwrap().execute(
+            "DELETE FROM search_pages WHERE substr(scope,1,?1) = ?2",
+            params![prefix.len(), prefix],
+        )?;
+        Ok(())
     }
     pub fn state(&self, target: &Target, status: &str, reason: Option<&str>) -> Result<()> {
         self.db.lock().unwrap().execute("INSERT INTO works VALUES (?1,?2,?3,?4,?5) ON CONFLICT(kind,id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at,reason=excluded.reason", params![target.kind, target.id, status, now(), reason])?;
@@ -959,6 +1056,30 @@ impl Archive {
 impl Drop for Archive {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.lock);
+    }
+}
+
+struct DiscoveryCache<'a> {
+    archive: &'a Archive,
+    client: &'a dyn Transport,
+    scope: String,
+}
+impl Transport for DiscoveryCache<'_> {
+    fn api(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+        self.archive
+            .cached_discovery_api(self.client, &self.scope, path, query, None)
+    }
+    fn download(&self, url: &str, path: &Path) -> Result<()> {
+        self.client.download(url, path)
+    }
+    fn requests(&self) -> usize {
+        self.client.requests()
+    }
+    fn stopped(&self) -> bool {
+        self.client.stopped()
+    }
+    fn cancel(&self) {
+        self.client.cancel();
     }
 }
 

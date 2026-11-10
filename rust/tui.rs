@@ -702,9 +702,7 @@ impl App {
         }
         if let Some(reason) = v.get("stop_reason").filter(|reason| !reason.is_null()) {
             lines.push(format!("停止理由: {}", stop_label(reason)));
-            lines.push(
-                "F11で最新の保存対象一覧から再開できます。F10で次回の予算を設定できます。".into(),
-            );
+            lines.push(resume_hint(v).into());
         }
         if let Some(reason) = v["reason"].as_str() {
             lines.push(reason.into());
@@ -999,10 +997,8 @@ impl App {
                     if let Some(reason) =
                         value.get("stop_reason").filter(|reason| !reason.is_null())
                     {
-                        self.log(format!(
-                            "停止理由: {} · F11で最新の保存対象から再開",
-                            stop_label(reason)
-                        ));
+                        self.log(format!("停止理由: {}", stop_label(reason)));
+                        self.log(resume_hint(&value).into());
                     }
                     self.status = value["status"]
                         .as_str()
@@ -1064,6 +1060,10 @@ impl App {
                             c["existing"],
                             c["problems"].as_array().map_or(0, Vec::len)
                         ));
+                    }
+                    if self.status == "FAILED" {
+                        self.modal = Modal::Result;
+                        self.modal_scroll = 0;
                     }
                     self.last = Some(value);
                     finished = true;
@@ -1581,9 +1581,21 @@ fn stop_label(value: &Value) -> String {
         Some("request_budget") => "要求予算に到達・進行中の保存を保持".into(),
         Some("http_status") => format!("HTTP {}により停止", value["status"]),
         Some("unexpected_content") => "期待と異なる応答で停止".into(),
+        Some("search_incomplete") => "検索一覧の列挙が未完了".into(),
         Some("worker_error") => "ワーカー異常で停止".into(),
         Some("disk_error") => "保存領域の問題で停止".into(),
         _ => clean(&value.to_string()),
+    }
+}
+fn resume_hint(value: &Value) -> &'static str {
+    if value["discovery_complete"] == false {
+        if value["discovery_resumable"] == true {
+            "F11で保存済み検索ページから一覧の列挙を続けられます。検索条件による未達なら条件を絞って再実行してください。"
+        } else {
+            "対象一覧が未確定です。元のURLから再実行してください。以前の別の一覧は再開しません。"
+        }
+    } else {
+        "F11で最新の保存対象一覧から再開できます。F10で次回の予算を設定できます。"
     }
 }
 fn transport_summary(value: &Value) -> Vec<String> {
@@ -2082,7 +2094,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         }
         frame.render_widget(Clear, popup);
         let text = if app.modal == Modal::Help {
-            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者・タグ検索URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 通信と要求予算 / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n一覧取得が未完了なら再開せず、元のURLでもう一度確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜8\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
+            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者・タグ検索URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 通信と要求予算 / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n列挙中の予算切れ・取消もF11で続行。条件による未達は元URLで再確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜8\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
         } else if app.modal == Modal::Collection {
             app.collection_details()
         } else if app.modal == Modal::Update {
@@ -2377,6 +2389,25 @@ mod tests {
         assert!(app.row_index.is_empty());
         assert_eq!(app.complete, 0);
         assert_eq!(app.body_ready, 0);
+    }
+    #[test]
+    fn failed_search_shows_reason_and_correct_discovery_resume_hint() {
+        let mut app = App::default();
+        let (sender, receiver) = mpsc::channel();
+        app.worker = Some(Worker {
+            receiver,
+            stop: Arc::default(),
+            handle: thread::spawn(move || {
+                sender.send(Event::Finished(serde_json::json!({"status":"failed","reason":"Search incomplete on 2024-02-29",
+                "stop_reason":{"kind":"search_incomplete"},"discovery_complete":false,"discovery_resumable":true}))).unwrap();
+            }),
+        });
+        finish(&mut app);
+        assert!(app.modal == Modal::Result);
+        let summary = app.summary();
+        assert!(summary.contains("2024-02-29"));
+        assert!(summary.contains("保存済み検索ページ"));
+        assert!(!summary.contains("ワーカー異常"));
     }
     #[test]
     fn planned_author_list_keeps_all_four_thousand_targets() {

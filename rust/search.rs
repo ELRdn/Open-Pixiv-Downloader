@@ -1,10 +1,21 @@
 use crate::{
-    error::{invalid, Result},
-    target::Target,
+    error::{invalid, Error, Result},
+    target::{Target, MAX_WORKS},
     transport::Transport,
 };
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate};
+use serde_json::Value;
 use std::collections::HashSet;
 use url::Url;
+
+enum RangeTask {
+    Search(Option<NaiveDate>, Option<NaiveDate>),
+    Verify {
+        before: usize,
+        expected: u64,
+        observed: Vec<Target>,
+    },
+}
 
 fn parts(url: &Url) -> Result<(&str, &str)> {
     let path = url.path().strip_prefix("/en").unwrap_or(url.path());
@@ -71,16 +82,48 @@ pub fn validate(url: &Url) -> Result<()> {
             "gs" => value == "0",
             "p" => value.parse::<u32>().is_ok_and(|n| n > 0),
             "r" => matches!(value.as_ref(), "0" | "1"),
+            "scd" | "ecd" => NaiveDate::parse_from_str(&value, "%Y-%m-%d").is_ok(),
             _ => true,
         };
         if !valid {
             return Err(invalid(&format!("Unsupported tag-search value: {key}")));
         }
     }
+    let start = url
+        .query_pairs()
+        .find(|(key, _)| key == "scd")
+        .map(|(_, value)| value.into_owned());
+    let end = url
+        .query_pairs()
+        .find(|(key, _)| key == "ecd")
+        .map(|(_, value)| value.into_owned());
+    if start
+        .as_ref()
+        .zip(end.as_ref())
+        .is_some_and(|(start, end)| start > end)
+    {
+        return Err(invalid("Search start date must not follow its end date"));
+    }
     Ok(())
 }
 
 pub fn discover(client: &dyn Transport, source: &str, types: &str) -> Result<Vec<Target>> {
+    discover_with(
+        client,
+        source,
+        types,
+        |path, query, _| client.api(path, query),
+        |_| {},
+    )
+}
+
+pub fn discover_with(
+    client: &dyn Transport,
+    source: &str,
+    types: &str,
+    mut fetch: impl FnMut(&str, &[(&str, String)], &str) -> Result<Value>,
+    mut progress: impl FnMut(String),
+) -> Result<Vec<Target>> {
     let url = Url::parse(source).map_err(|_| invalid("Invalid search URL"))?;
     validate(&url)?;
     let (tag, category) = parts(&url)?;
@@ -107,7 +150,7 @@ pub fn discover(client: &dyn Transport, source: &str, types: &str) -> Result<Vec
         {
             continue;
         }
-        let mut query: Vec<(&str, String)> = vec![
+        let mut base: Vec<(&str, String)> = vec![
             ("word", word.clone()),
             ("order", "date_d".into()),
             ("mode", "safe".into()),
@@ -115,66 +158,255 @@ pub fn discover(client: &dyn Transport, source: &str, types: &str) -> Result<Vec
         ];
         let pairs: Vec<_> = url.query_pairs().collect();
         for (key, value) in &pairs {
-            if key == "p" {
+            if matches!(key.as_ref(), "p" | "scd" | "ecd") {
                 continue;
             }
-            if let Some(pair) = query.iter_mut().find(|(k, _)| *k == key.as_ref()) {
+            if let Some(pair) = base.iter_mut().find(|(k, _)| *k == key.as_ref()) {
                 pair.1 = value.to_string();
             } else {
-                query.push((key.as_ref(), value.to_string()));
+                base.push((key.as_ref(), value.to_string()));
             }
         }
-        query.push(("p", "1".into()));
         let mut seen = HashSet::new();
-        let mut expected = 0;
-        for page in 1..=100_000 {
-            query.last_mut().unwrap().1 = page.to_string();
-            let body = client.api(&format!("/ajax/search/{endpoint}/{tag}"), &query)?;
-            let result = &body[node];
-            let entries = result["data"]
-                .as_array()
-                .ok_or_else(|| invalid("Tag-search result schema changed"))?;
-            let total = result["total"]
-                .as_u64()
-                .ok_or_else(|| invalid("Missing tag-search total"))?;
-            expected = expected.max(total);
-            if expected > 100_000 {
-                return Err(invalid("Search exceeds 100000 works; narrow the search"));
+        let date = |name: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| NaiveDate::parse_from_str(value, "%Y-%m-%d").unwrap())
+        };
+        let mut pending = vec![RangeTask::Search(date("scd"), date("ecd"))];
+        while let Some(task) = pending.pop() {
+            if client.stopped() {
+                return Err(Error::Stop("Stopped while listing search results".into()));
             }
-            let before = seen.len();
-            for item in entries {
-                if item["isAdContainer"] == true {
+            let (start, mut end) = match task {
+                RangeTask::Search(start, end) => (start, end),
+                RangeTask::Verify {
+                    before,
+                    expected,
+                    observed,
+                } => {
+                    if ((seen.len() - before) as u64) < expected
+                        || observed.iter().any(|target| !seen.contains(target))
+                    {
+                        return Err(invalid("Search results changed while splitting dates; the incomplete index was not accepted. Run the source search again"));
+                    }
                     continue;
                 }
-                let id = item["id"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| item["id"].to_string());
-                let target = Target::new(kind, &id)?;
-                if seen.insert(target.clone()) {
-                    refs.push(target);
+            };
+            if start.is_some() && end.is_none() {
+                let mut newest_query = base.clone();
+                newest_query
+                    .iter_mut()
+                    .find(|(key, _)| *key == "order")
+                    .unwrap()
+                    .1 = "date_d".into();
+                newest_query.push(("p", "1".into()));
+                let newest = fetch(
+                    &format!("/ajax/search/{endpoint}/{tag}"),
+                    &newest_query,
+                    node,
+                )?;
+                let entries = newest[node]["data"]
+                    .as_array()
+                    .ok_or_else(|| invalid("Tag-search result schema changed"))?;
+                let mut latest = None;
+                for item in entries.iter().filter(|item| item["isAdContainer"] != true) {
+                    let date = result_date(item)?.ok_or_else(|| {
+                        invalid("Search cannot bound its end without creation dates")
+                    })?;
+                    latest = Some(latest.map_or(date, |last: NaiveDate| last.max(date)));
+                }
+                let Some(latest) = latest else {
+                    if newest[node]["total"] == 0 {
+                        continue;
+                    }
+                    return Err(invalid("Search cannot determine its latest creation date"));
+                };
+                if start.is_some_and(|start| start > latest) {
+                    continue;
+                }
+                end = Some(latest);
+            }
+            if let Some((start, end)) = start
+                .zip(end)
+                .filter(|(start, end)| (*end - *start).num_days() >= 365)
+            {
+                // Pixiv silently trims long date ranges; query at most 365 inclusive days.
+                let split = start + Duration::days((end - start).num_days() / 2);
+                let left = RangeTask::Search(Some(start), Some(split));
+                let right = RangeTask::Search(
+                    Some(
+                        split
+                            .succ_opt()
+                            .ok_or_else(|| invalid("Search date overflow"))?,
+                    ),
+                    Some(end),
+                );
+                if base
+                    .iter()
+                    .any(|(key, value)| *key == "order" && value == "date")
+                {
+                    pending.extend([right, left]);
+                } else {
+                    pending.extend([left, right]);
+                }
+                continue;
+            }
+            let mut query = base.clone();
+            if let Some(start) = start {
+                query.push(("scd", start.to_string()));
+            }
+            if let Some(end) = end {
+                query.push(("ecd", end.to_string()));
+            }
+            query.push(("p", "1".into()));
+            let mut found = Vec::new();
+            let mut range_seen = HashSet::new();
+            let mut dates = Vec::new();
+            let mut expected = 0;
+            let mut complete = false;
+            for page in 1..=MAX_WORKS {
+                if client.stopped() {
+                    return Err(Error::Stop("Stopped while listing search results".into()));
+                }
+                query.last_mut().unwrap().1 = page.to_string();
+                let body = fetch(&format!("/ajax/search/{endpoint}/{tag}"), &query, node)?;
+                let result = &body[node];
+                let entries = result["data"]
+                    .as_array()
+                    .ok_or_else(|| invalid("Tag-search result schema changed"))?;
+                let total = result["total"]
+                    .as_u64()
+                    .ok_or_else(|| invalid("Missing tag-search total"))?;
+                expected = expected.max(total);
+                if expected > MAX_WORKS as u64 {
+                    return Err(invalid("Search exceeds 1000000 works; narrow the search"));
+                }
+                let before = range_seen.len();
+                for item in entries {
+                    if item["isAdContainer"] == true {
+                        continue;
+                    }
+                    let id = item["id"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| item["id"].to_string());
+                    let target = Target::new(kind, &id)?;
+                    if let Some(date) = result_date(item)? {
+                        if start.is_some_and(|start| date < start)
+                            || end.is_some_and(|end| date > end)
+                        {
+                            return Err(invalid(
+                                "Search returned a work outside the requested date range",
+                            ));
+                        }
+                        dates.push(date);
+                    }
+                    if range_seen.insert(target.clone()) {
+                        found.push(target);
+                    }
+                }
+                progress(format!(
+                    "検索列挙: 確定 {}件 / 今の区間 {}/{}件 · {}〜{} · {page}ページ",
+                    refs.len(),
+                    found.len(),
+                    expected,
+                    start.map_or_else(|| "開始指定なし".into(), |d| d.to_string()),
+                    end.map_or_else(|| "終了指定なし".into(), |d| d.to_string())
+                ));
+                if found.len() as u64 > expected {
+                    return Err(invalid("Tag-search total changed; run the search again"));
+                }
+                if found.len() as u64 == expected {
+                    complete = true;
+                    break;
+                }
+                if range_seen.len() == before
+                    || result["lastPage"]
+                        .as_u64()
+                        .is_some_and(|last| page as u64 >= last)
+                {
+                    break;
                 }
             }
-            if refs.len() > 100_000 {
-                return Err(invalid("Search exceeds 100000 works; narrow the search"));
+            if complete {
+                for target in found {
+                    if seen.insert(target.clone()) {
+                        refs.push(target);
+                    }
+                }
+                if refs.len() > MAX_WORKS {
+                    return Err(invalid("Search exceeds 1000000 works; narrow the search"));
+                }
+                continue;
             }
-            if seen.len() as u64 > expected {
-                return Err(invalid("Tag-search total changed; run the search again"));
-            }
-            if seen.len() as u64 >= expected {
-                break;
-            }
-            if seen.len() == before || result["lastPage"].as_u64().is_some_and(|last| page >= last)
+            let first = dates.iter().min().copied().ok_or_else(|| {
+                invalid("Search is truncated but has no creation dates to split; narrow the search")
+            })?;
+            let last = dates.iter().max().copied().unwrap();
+            // Unbounded tails stay unbounded; no assumed epoch can omit older works.
+            let split = if let Some((start, end)) =
+                start.zip(end).filter(|(start, end)| start < end)
             {
-                return Err(invalid(&format!(
-                    "Search incomplete: found {} of {expected} {kind} works; results changed or the search range is limited. Narrow the search and try again",
-                    seen.len()
-                )));
+                start + Duration::days((end - start).num_days() / 2)
+            } else if first < last {
+                first + Duration::days((last - first).num_days() / 2)
+            } else if end.is_none_or(|end| first < end) {
+                first
+            } else if start.is_none_or(|start| first > start) {
+                first
+                    .pred_opt()
+                    .ok_or_else(|| invalid("Search date underflow"))?
+            } else {
+                return Err(invalid(&format!("Search incomplete on {first}: found {} of {expected} {kind} works within the accessible page range. Narrow this day's search", found.len())));
+            };
+            if start.is_some_and(|start| split < start) || end.is_some_and(|end| split >= end) {
+                return Err(invalid("Search date split made no progress"));
             }
+            let next = split
+                .succ_opt()
+                .ok_or_else(|| invalid("Search date overflow"))?;
+            pending.push(RangeTask::Verify {
+                before: seen.len(),
+                expected,
+                observed: found,
+            });
+            let left = RangeTask::Search(start, Some(split));
+            let right = RangeTask::Search(Some(next), end);
+            if base
+                .iter()
+                .any(|(key, value)| *key == "order" && value == "date")
+            {
+                pending.extend([right, left]);
+            } else {
+                pending.extend([left, right]);
+            }
+            progress(format!(
+                "検索のページ範囲で未達のため日付分割: {split}以前 / {next}以降"
+            ));
         }
     }
     Ok(refs)
 }
+
+fn result_date(item: &Value) -> Result<Option<NaiveDate>> {
+    item["createDate"]
+        .as_str()
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|date| {
+                    date.with_timezone(&FixedOffset::east_opt(9 * 3600).unwrap())
+                        .date_naive()
+                })
+                .map_err(|_| invalid("Invalid search result creation date"))
+        })
+        .transpose()
+}
+
+#[cfg(test)]
+#[path = "search_scale_tests.rs"]
+mod scale_tests;
 
 #[cfg(test)]
 mod tests {
@@ -331,6 +563,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn split_results_cannot_drop_parent_count_or_observed_ids() {
+        let first = json!({"novel":{"data":[{"id":"1","createDate":"2024-01-01T12:00:00+09:00"}],"total":2,"lastPage":1}});
+        for pages in [
+            vec![
+                first.clone(),
+                json!({"novel":{"data":[],"total":0}}),
+                json!({"novel":{"data":[{"id":"1","createDate":"2024-01-01T12:00:00+09:00"}],"total":1}}),
+            ],
+            vec![
+                first.clone(),
+                json!({"novel":{"data":[{"id":"2","createDate":"2024-01-02T12:00:00+09:00"}],"total":1}}),
+                json!({"novel":{"data":[{"id":"2","createDate":"2024-01-02T12:00:00+09:00"}],"total":1}}),
+                json!({"novel":{"data":[{"id":"3","createDate":"2024-01-01T12:00:00+09:00"}],"total":1}}),
+            ],
+        ] {
+            let error = discover(
+                &Search {
+                    pages,
+                    ..Default::default()
+                },
+                "https://www.pixiv.net/tags/test/novels",
+                "novel",
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("changed while splitting"));
+        }
+    }
     #[test]
     fn incomplete_or_incompatible_results_never_report_success() {
         for pages in [
