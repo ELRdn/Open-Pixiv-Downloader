@@ -2,6 +2,8 @@ use crate::error::{invalid, Result};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+pub const MAX_WORKS: usize = 1_000_000;
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Target {
     pub kind: String,
