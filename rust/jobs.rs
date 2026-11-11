@@ -4,7 +4,7 @@ use crate::{
     error::{invalid, Error, Result, StopReason},
     media::SharedMedia,
     target::{Target, MAX_WORKS},
-    transport::{Fixture, Online, Transport, DEMO},
+    transport::{Fixture, Online, Transport, DEMO, MAX_REQUEST_BUDGET},
 };
 use serde_json::{json, Value};
 use std::{
@@ -35,6 +35,7 @@ pub struct Options {
     pub retry_unavailable: bool,
     pub balanced: bool,
     pub resume: bool,
+    pub text_only: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -56,6 +57,7 @@ impl Default for Options {
             retry_unavailable: false,
             balanced: false,
             resume: false,
+            text_only: false,
         }
     }
 }
@@ -123,7 +125,7 @@ pub fn targets(options: &Options) -> Result<Vec<Target>> {
 /// A target snapshot is separate from per-work checkpoints: a crash cannot erase
 /// the remaining IDs, and a resume never silently refreshes an author's list.
 fn snapshot(options: &Options, refs: &[Target], source: &[String]) -> Value {
-    json!({"schema_version":1,"discovery_complete":true,"discovery_resumable":false,"created_at":now(),"mode":if options.online {"online"}else{"fixture"},"source_targets":source,"targets":refs.iter().map(Target::label).collect::<Vec<_>>(),"all":options.all,"limit":options.limit,"types":options.types,"jobs":options.jobs,"request_budget":options.request_budget,"balanced":options.balanced,"interval":options.interval,"api_interval":options.api_interval})
+    json!({"schema_version":1,"discovery_complete":true,"discovery_resumable":false,"created_at":now(),"mode":if options.online {"online"}else{"fixture"},"source_targets":source,"targets":refs.iter().map(Target::label).collect::<Vec<_>>(),"all":options.all,"limit":options.limit,"types":options.types,"jobs":options.jobs,"request_budget":options.request_budget,"balanced":options.balanced,"interval":options.interval,"api_interval":options.api_interval,"text_only":options.text_only})
 }
 #[derive(Debug)]
 struct SavedSelection {
@@ -162,6 +164,9 @@ fn resume_targets(options: &Options) -> Result<SavedSelection> {
         return Err(invalid("Saved job format or online/fixture mode differs"));
     }
     let complete = v["discovery_complete"] == true;
+    if v["text_only"] == true && !options.text_only {
+        return Err(invalid("本文専用の保存対象です。F10で「本文のみ」を選ぶか --text-only を付けて再開してください。"));
+    }
     if !complete && (v["discovery_complete"] != false || v["discovery_resumable"] != true) {
         return Err(invalid("Saved selection is incomplete; run the source URLs again instead of resuming an older job"));
     }
@@ -253,11 +258,11 @@ pub fn run(
     if !(1..=8).contains(&options.jobs)
         || !(1..=1000).contains(&options.limit)
         || !(1..=1024).contains(&options.max_file_mib)
-        || !(1..=100_000).contains(&options.request_budget)
+        || !(1..=MAX_REQUEST_BUDGET).contains(&options.request_budget)
         || !["all", "art", "novel"].contains(&options.types.as_str())
     {
         return Err(invalid(
-            "Use jobs 1–8, limit 1–1000, request budget 1–100000, file size 1–1024 MiB",
+            "Use jobs 1–8, limit 1–1000, request budget 1–1000000, file size 1–1024 MiB",
         ));
     }
     if usize::from(options.online)
@@ -280,6 +285,11 @@ pub fn run(
     } else {
         targets(&options)?
     };
+    if options.text_only && input.iter().any(|target| target.kind == "art") {
+        return Err(invalid(
+            "本文のみモードは小説専用です。小説・作者・タグURLを指定してください。",
+        ));
+    }
     let inner: Arc<dyn Transport> = if options.online {
         Arc::new(Online::with_profile(
             options.interval,
@@ -303,7 +313,9 @@ pub fn run(
     };
     let client: Arc<dyn Transport> =
         Arc::new(SharedMedia::new(inner, options.max_file_mib * 1024 * 1024)?);
-    let archive = Arc::new(Archive::open(&options.out, options.resume)?);
+    let mut archive = Archive::open(&options.out, options.resume)?;
+    archive.text_only = options.text_only;
+    let archive = Arc::new(archive);
     let resumed = if options.resume {
         Some(resume_targets(&options)?)
     } else {
@@ -321,6 +333,9 @@ pub fn run(
                 .collect::<Result<Vec<_>>>()?;
         }
     }
+    if options.text_only {
+        options.types = "novel".into();
+    }
     let discovery_complete = resumed
         .as_ref()
         .is_some_and(|saved| saved.pending.is_none());
@@ -336,6 +351,7 @@ pub fn run(
         .unwrap_or_else(|| input.iter().map(Target::label).collect());
     let mut report = json!({"tool_version":env!("CARGO_PKG_VERSION"),"started_at":now(),"mode":if options.online{"anonymous_online_unvalidated"}else{"synthetic_offline"},"targets":sources,"target":if sources.len()==1 {sources[0].clone()}else{"batch".into()},"jobs":options.jobs,"limit":if options.all{Value::Null}else{json!(options.limit)},"resumed":options.resume,"request_budget":options.request_budget,"balanced":options.balanced,"status":"running","results":[],"body_ready_count":0,"full_complete_count":0,"stop_reason":Value::Null});
     report["discovery_complete"] = json!(discovery_complete);
+    report["text_only"] = json!(options.text_only);
     report["discovery_resumable"] = json!(!discovery_complete);
     report["selected"] = json!(0);
     report["previous_exclusions"] = json!(0);
@@ -399,6 +415,9 @@ pub fn run(
             return Err(invalid(
                 "Discovered more than 1000000 works; narrow selection",
             ));
+        }
+        if options.text_only {
+            refs.retain(|target| target.kind == "novel");
         }
         let saved_refs = discovery_complete.then(|| refs.clone());
         report["discovered"] = json!(refs.len());
@@ -474,7 +493,13 @@ pub fn run(
             .count());
         report["estimated_typical_requests_remaining"] = json!(selected
             .iter()
-            .map(|t| if t.kind == "novel" { 2 } else { 3 })
+            .map(|t| if options.text_only {
+                1
+            } else if t.kind == "novel" {
+                2
+            } else {
+                3
+            })
             .sum::<usize>());
         emit(Event::Selected {
             total: selected.len(),
@@ -483,9 +508,14 @@ pub fn run(
             excluded,
         });
         emit(Event::Message(format!(
-            "対象 {} / 要求予算 {} / 本文・表紙の概算 {} 要求（挿絵・多ページは追加）",
+            "対象 {} / 要求予算 {} / {}の概算 {} 要求",
             selected.len(),
             options.request_budget,
+            if options.text_only {
+                "本文のみ"
+            } else {
+                "本文・表紙（挿絵・多ページは追加）"
+            },
             report["estimated_typical_requests_remaining"]
         )));
         if plan {
@@ -546,7 +576,7 @@ pub fn run(
             )?;
         }
     }
-    if !plan {
+    if !plan && !options.text_only {
         if let Err(e) = collected.write(&archive.root) {
             collected.problem("", "collection-report.json", e);
         }
@@ -578,8 +608,15 @@ pub fn run(
     } else {
         0.0
     });
-    report["catalog_entries"] = json!(archive.catalog()?);
     report["elapsed_seconds"] = json!(started.elapsed().as_secs_f64());
+    if options.text_only {
+        let results = report.as_object_mut().unwrap().remove("results").unwrap();
+        let data = serde_json::to_vec(&report)?;
+        report["results"] = results;
+        atomic(&safe_path(&archive.root, "last-run.json")?, &data)?;
+        return Ok(report);
+    }
+    report["catalog_entries"] = json!(archive.catalog()?);
     let data = serde_json::to_vec_pretty(&report)?;
     atomic(&safe_path(&archive.root, "last-run.json")?, &data)?;
     let name = format!(
@@ -726,7 +763,7 @@ fn schedule_core(
                     .map_err(|_| invalid("Worker queue closed"))?;
                 active += 1;
             }
-            if let Some(target) = existing.get(existing_next) {
+            if let Some(target) = existing.get(existing_next).filter(|_| !archive.text_only) {
                 match copies.try_send((target.clone(), archive.manifest(target))) {
                     Ok(()) => existing_next += 1,
                     Err(mpsc::TrySendError::Full(_)) => {}
@@ -747,27 +784,33 @@ fn schedule_core(
                     }
                     active -= 1;
                     let body_ready = target.kind == "novel"
-                        && archive.manifest(&target).is_some_and(|m| {
-                            ["source.txt", "plain.txt"].iter().all(|name| {
-                                m["files"]
-                                    .as_array()
-                                    .and_then(|f| f.iter().find(|e| e["path"] == *name))
-                                    .is_some_and(|e| {
-                                        safe_path(
-                                            &archive.root,
-                                            &format!("works/{}/{}", target.key(), name),
-                                        )
-                                        .ok()
-                                        .and_then(|p| fingerprint(&p).ok())
-                                        .is_some_and(|(h, b)| e["sha256"] == h && e["bytes"] == b)
+                        && ((archive.text_only && archive.complete(&target)?)
+                            || (!archive.text_only
+                                && archive.manifest(&target).is_some_and(|m| {
+                                    ["source.txt", "plain.txt"].iter().all(|name| {
+                                        m["files"]
+                                            .as_array()
+                                            .and_then(|f| f.iter().find(|e| e["path"] == *name))
+                                            .is_some_and(|e| {
+                                                safe_path(
+                                                    &archive.root,
+                                                    &format!("works/{}/{}", target.key(), name),
+                                                )
+                                                .ok()
+                                                .and_then(|p| fingerprint(&p).ok())
+                                                .is_some_and(|(h, b)| {
+                                                    e["sha256"] == h && e["bytes"] == b
+                                                })
+                                            })
                                     })
-                            })
-                        });
+                                })));
                     if body_ready && body_keys.insert(target.key()) {
                         emit(Event::BodyReady { key: target.key() });
-                        copies
-                            .send((target.clone(), archive.manifest(&target)))
-                            .map_err(|_| invalid("Collection worker terminated"))?;
+                        if !archive.text_only {
+                            copies
+                                .send((target.clone(), archive.manifest(&target)))
+                                .map_err(|_| invalid("Collection worker terminated"))?;
+                        }
                     }
                     if matches!(stage, Stage::Prepare)
                         && result.as_ref().is_ok_and(|s| s == "assets_pending")
@@ -856,7 +899,10 @@ fn schedule_core(
             }
         }
         drop(tasks);
-        for target in &existing[existing_next..] {
+        for target in existing[existing_next..]
+            .iter()
+            .filter(|_| !archive.text_only)
+        {
             copies
                 .send((target.clone(), archive.manifest(target)))
                 .map_err(|_| invalid("Collection worker terminated"))?;
@@ -905,6 +951,108 @@ fn schedule_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_only_budget_resume_and_existing_txt_use_the_flat_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fixture: Value = serde_json::from_str(DEMO).unwrap();
+        let mut second = fixture["responses"]["/ajax/novel/1004"].clone();
+        second["id"] = json!("1005");
+        fixture["responses"]["/ajax/novel/1005"] = second;
+        let fixture_path = temp.path().join("fixture.json");
+        fs::write(&fixture_path, fixture.to_string()).unwrap();
+        let out = temp.path().join("archive");
+        let options = Options {
+            targets: vec!["novel:1004".into(), "novel:1005".into()],
+            fixture: Some(fixture_path),
+            text_only: true,
+            jobs: 1,
+            request_budget: 1,
+            all: true,
+            out: out.clone(),
+            ..Default::default()
+        };
+        let report = run(options.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(report["status"], "paused");
+        assert_eq!(report["requests"], 1);
+        assert_eq!(report["body_ready_count"], 1);
+        let resumed = Options {
+            targets: vec![],
+            resume: true,
+            ..options
+        };
+        let report = run(resumed.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(report["status"], "complete");
+        assert_eq!(report["requests"], 1);
+        assert_eq!(report["already_complete"], 1);
+        assert_eq!(report["body_ready_count"], 2);
+        let report = run(resumed.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(report["requests"], 0);
+        assert_eq!(report["already_complete"], 2);
+        assert_eq!(report["selected"], 0);
+        assert!(out.join("novel/novel_1004.txt").is_file());
+        assert!(out.join("novel/novel_1005.txt").is_file());
+        for name in ["works", "runs", "catalog.jsonl", "collection-report.json"] {
+            assert!(!out.join(name).exists(), "unexpected file: {name}");
+        }
+        let saved: Value =
+            serde_json::from_slice(&fs::read(out.join("last-run.json")).unwrap()).unwrap();
+        assert!(saved.get("results").is_none());
+        assert!(run(
+            Options {
+                text_only: false,
+                ..resumed
+            },
+            false,
+            Arc::default(),
+            |_| {}
+        )
+        .is_err());
+
+        let out = temp.path().join("preexisting");
+        fs::create_dir_all(out.join("novel")).unwrap();
+        fs::write(out.join("novel/novel_1004.txt"), "既存本文").unwrap();
+        let report = run(
+            Options {
+                targets: vec!["novel:1004".into()],
+                demo: true,
+                text_only: true,
+                out,
+                request_budget: MAX_REQUEST_BUDGET,
+                ..Default::default()
+            },
+            false,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(report["requests"], 0);
+        assert_eq!(report["already_complete"], 1);
+        assert_eq!(report["selected"], 0);
+    }
+
+    #[test]
+    fn text_only_author_discovery_excludes_artworks() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = run(
+            Options {
+                targets: vec!["user:9001".into()],
+                demo: true,
+                text_only: true,
+                all: true,
+                out: temp.path().to_path_buf(),
+                ..Default::default()
+            },
+            false,
+            Arc::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(report["discovered"], 1);
+        assert_eq!(report["selected"], 1);
+        assert_eq!(report["status"], "complete");
+        assert!(!temp.path().join("works").exists());
+    }
     #[test]
     fn selection_above_100000_is_saved_and_resumed_without_network() {
         let temp = tempfile::tempdir().unwrap();

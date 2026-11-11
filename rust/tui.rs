@@ -2,7 +2,9 @@ use crate::{
     archive::{safe_path, Archive},
     error::{invalid, Result},
     jobs::{self, Event, Options},
+    settings::{self, Settings},
     target::Target,
+    transport::MAX_REQUEST_BUDGET,
     update,
 };
 use crossterm::{
@@ -302,6 +304,9 @@ impl WorkRow {
                 return None;
             }
             Target::new(kind, id).ok()?;
+            if kind == "novel" && safe_path(root, &format!("novel/{key}.txt")).ok()?.is_file() {
+                return safe_path(root, "novel").ok();
+            }
             let path = safe_path(root, &format!("works/{key}")).ok()?;
             path.is_dir().then_some(path)
         });
@@ -318,6 +323,11 @@ struct App {
     other_urls: Editor,
     other_out: Editor,
     jobs: usize,
+    text_only: bool,
+    settings_jobs: usize,
+    settings_text_only: bool,
+    settings_path: Option<PathBuf>,
+    settings_load_failed: bool,
     request_budget: usize,
     active_request_budget: usize,
     balanced: bool,
@@ -364,6 +374,11 @@ impl Default for App {
             other_urls: Editor::new("user:9001"),
             other_out: Editor::new("demo-archive"),
             jobs: 2,
+            text_only: false,
+            settings_jobs: 2,
+            settings_text_only: false,
+            settings_path: None,
+            settings_load_failed: false,
             request_budget: 20_000,
             active_request_budget: 20_000,
             balanced: true,
@@ -414,8 +429,12 @@ impl App {
             return;
         }
         let root = std::path::Path::new(self.out.value.trim());
-        let result = safe_path(root, &format!("works/{kind}"))
-            .and_then(|p| crate::folder::open(&p).map(|()| p));
+        let relative = if kind == "novel" && self.text_only {
+            "novel".into()
+        } else {
+            format!("works/{kind}")
+        };
+        let result = safe_path(root, &relative).and_then(|p| crate::folder::open(&p).map(|()| p));
         match result {
             Ok(path) => self.log(format!("フォルダーを開きました: {}", path.display())),
             Err(e) => self.log(e.to_string()),
@@ -428,7 +447,66 @@ impl App {
         let root = std::env::current_dir()
             .unwrap_or_default()
             .join(self.out.value.trim());
+        if self.text_only {
+            return format!("本文のみモード\n\n小説: {}\n\nN: 本文フォルダーを開く / Esc: 戻る\nTXTへ直接保存します。既存TXTも確認し、画像・集約コピーは作成しません。", root.join("novel").display());
+        }
         format!("{}\nI: 画像を開く / N: 小説を開く / Esc: 戻る\n↑↓: スクロール\n\n画像: {}\n小説: {}\n\n新しく保存した作品は自動で集約します。\n画像は作品ID＋ページ番号、小説は作品ID.txtで保存します。\nコピーなので、集約先の編集は作品別の元ファイルに影響しません。",if self.worker.is_some(){"保存処理中です。終了後にEnterで既存分を集約できます。"}else{"Enter: 既存の保存済み作品を集約・補完（通信なし）"},root.join("works/image").display(),root.join("works/novel").display())
+    }
+    fn preferences(&self) -> Settings {
+        let out = if self.demo {
+            &self.other_out.value
+        } else {
+            &self.out.value
+        };
+        Settings {
+            out: if out.trim().is_empty() {
+                String::new()
+            } else {
+                std::path::absolute(out.trim())
+                    .unwrap_or_else(|_| PathBuf::from(out.trim()))
+                    .to_string_lossy()
+                    .into_owned()
+            },
+            jobs: self.jobs,
+            text_only: self.text_only,
+            request_budget: self.request_budget,
+            balanced: self.balanced,
+            interval: self.interval,
+            api_interval: self.api_interval,
+            ..Default::default()
+        }
+    }
+    fn save_preferences(&self, settings: &Settings, confirmed: bool) -> Result<()> {
+        if self.settings_load_failed && !confirmed {
+            return Err(invalid(
+                "読み込めなかった設定は保持しました。F10で設定を確認し、Enterで保存してください。",
+            ));
+        }
+        if let Some(path) = &self.settings_path {
+            settings.save(path)?;
+        }
+        Ok(())
+    }
+    fn load_preferences(&mut self, path: PathBuf) {
+        if path.exists() {
+            match Settings::load(&path) {
+                Ok(settings) => {
+                    self.out = Editor::new(&settings.out);
+                    self.jobs = settings.jobs;
+                    self.text_only = settings.text_only;
+                    self.request_budget = settings.request_budget;
+                    self.active_request_budget = settings.request_budget;
+                    self.balanced = settings.balanced;
+                    self.interval = settings.interval;
+                    self.api_interval = settings.api_interval;
+                }
+                Err(error) => {
+                    self.settings_load_failed = true;
+                    self.log(format!("設定を読み込めません: {error}。初期値で起動します。F10で確認してください。"));
+                }
+            }
+        }
+        self.settings_path = Some(path);
     }
     fn open_settings(&mut self) {
         if self.worker.is_some() {
@@ -439,6 +517,8 @@ impl App {
         self.settings_interval = Editor::new(&self.interval.to_string());
         self.settings_api_interval = Editor::new(&self.api_interval.to_string());
         self.settings_balanced = self.balanced;
+        self.settings_jobs = self.jobs;
+        self.settings_text_only = self.text_only;
         self.settings_focus = 0;
         self.settings_error = None;
         self.modal = Modal::Settings;
@@ -461,7 +541,24 @@ impl App {
             return;
         };
         match self.settings_budget.value.parse::<usize>() {
-            Ok(value) if (1..=100_000).contains(&value) => {
+            Ok(value) if (1..=MAX_REQUEST_BUDGET).contains(&value) => {
+                let mut settings = self.preferences();
+                settings.request_budget = value;
+                settings.balanced = self.settings_balanced;
+                settings.jobs = self.settings_jobs;
+                settings.text_only = self.settings_text_only;
+                settings.interval = interval;
+                settings.api_interval = api_interval;
+                if let Err(error) = settings
+                    .validate()
+                    .and_then(|()| self.save_preferences(&settings, true))
+                {
+                    self.settings_error = Some(format!("設定を保存できません: {error}"));
+                    return;
+                }
+                self.jobs = settings.jobs;
+                self.settings_load_failed = false;
+                self.text_only = settings.text_only;
                 self.request_budget = value;
                 if self.worker.is_none() && self.last.is_none() {
                     self.active_request_budget = value;
@@ -476,16 +573,18 @@ impl App {
                     self.request_budget
                 ));
             }
-            _ => self.settings_error = Some("要求予算は1〜100000の整数で入力してください。".into()),
+            _ => {
+                self.settings_error = Some("要求予算は1〜1000000の整数で入力してください。".into())
+            }
         }
     }
     fn settings_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.modal = Modal::None,
-            KeyCode::Tab => self.settings_focus = (self.settings_focus + 1) % 4,
-            KeyCode::BackTab => self.settings_focus = (self.settings_focus + 3) % 4,
+            KeyCode::Tab => self.settings_focus = (self.settings_focus + 1) % 6,
+            KeyCode::BackTab => self.settings_focus = (self.settings_focus + 5) % 6,
             KeyCode::F(n @ 1..=3) => {
-                self.settings_budget = Editor::new(["500", "5000", "20000"][(n - 1) as usize]);
+                self.settings_budget = Editor::new(["500", "5000", "1000000"][(n - 1) as usize]);
                 self.settings_focus = 1;
                 self.settings_error = None;
             }
@@ -493,7 +592,19 @@ impl App {
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if self.settings_focus == 0 => {
                 self.settings_balanced = !self.settings_balanced;
             }
-            _ if self.settings_focus > 0 => {
+            KeyCode::Left if self.settings_focus == 4 => {
+                self.settings_jobs = self.settings_jobs.saturating_sub(1).max(1)
+            }
+            KeyCode::Right if self.settings_focus == 4 => {
+                self.settings_jobs = (self.settings_jobs + 1).min(8)
+            }
+            KeyCode::Char(c @ '1'..='8') if self.settings_focus == 4 => {
+                self.settings_jobs = c.to_digit(10).unwrap() as usize
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if self.settings_focus == 5 => {
+                self.settings_text_only = !self.settings_text_only
+            }
+            _ if (1..=3).contains(&self.settings_focus) => {
                 let decimal = self.settings_focus > 1;
                 let editor = match self.settings_focus {
                     1 => &mut self.settings_budget,
@@ -509,7 +620,7 @@ impl App {
                             && !key
                                 .modifiers
                                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                            && editor.value.len() < if decimal { 8 } else { 6 } =>
+                            && editor.value.len() < if decimal { 8 } else { 7 } =>
                     {
                         editor.key(key, false);
                     }
@@ -628,8 +739,16 @@ impl App {
     }
     fn progress_label(&self) -> String {
         format!(
-            "本文 {} / 全素材完了 {} / 要求 {}/{}",
-            self.body_ready, self.complete, self.requests, self.active_request_budget
+            "本文 {} / {} {} / 要求 {}/{}",
+            self.body_ready,
+            if self.text_only {
+                "本文保存完了"
+            } else {
+                "全素材完了"
+            },
+            self.complete,
+            self.requests,
+            self.active_request_budget
         )
     }
     fn telemetry_label(&self) -> String {
@@ -693,8 +812,14 @@ impl App {
         }
         if v.get("body_ready_count").is_some() {
             lines.push(format!(
-                "本文利用可能 {} / 全素材完了 {}",
-                v["body_ready_count"], v["full_complete_count"]
+                "本文利用可能 {} / {} {}",
+                v["body_ready_count"],
+                if v["text_only"] == true {
+                    "本文保存完了"
+                } else {
+                    "全素材完了"
+                },
+                v["full_complete_count"]
             ));
         }
         if let Some(budget) = v["request_budget"].as_u64() {
@@ -838,6 +963,7 @@ impl App {
                 2.0
             },
             request_budget: self.request_budget,
+            text_only: self.text_only,
             resume,
             out: PathBuf::from(self.out.value.trim()),
             jobs: self.jobs,
@@ -869,6 +995,12 @@ impl App {
                 ..Default::default()
             }
         };
+        if matches!(operation, "fetch" | "plan" | "resume") {
+            if let Err(error) = self.save_preferences(&self.preferences(), false) {
+                self.log(format!("設定を保存できません: {error}"));
+                return;
+            }
+        }
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
@@ -1137,7 +1269,11 @@ impl App {
                         "fetch"
                     });
                 }
-                KeyCode::Enter if self.modal == Modal::Collection && self.worker.is_none() => {
+                KeyCode::Enter
+                    if self.modal == Modal::Collection
+                        && self.worker.is_none()
+                        && !self.text_only =>
+                {
                     self.modal = Modal::None;
                     self.start("collect");
                 }
@@ -1335,9 +1471,17 @@ impl App {
                             self.settings_focus = i + 2;
                         }
                     }
+                    for (i, rect) in text_settings_controls(popup).iter().enumerate() {
+                        if rect.contains(point) {
+                            self.settings_focus = i + 4;
+                            if i == 1 {
+                                self.settings_text_only = !self.settings_text_only;
+                            }
+                        }
+                    }
                     for (i, rect) in presets.iter().enumerate() {
                         if rect.contains(point) {
-                            self.settings_budget = Editor::new(["500", "5000", "20000"][i]);
+                            self.settings_budget = Editor::new(["500", "5000", "1000000"][i]);
                             self.settings_focus = 1;
                             self.settings_error = None;
                         }
@@ -1670,9 +1814,20 @@ fn interval_controls(popup: Rect) -> [Rect; 2] {
     let fields = Layout::horizontal([Constraint::Percentage(50); 2]).split(area);
     [fields[0], fields[1]]
 }
+fn text_settings_controls(popup: Rect) -> [Rect; 2] {
+    [10, 11].map(|offset| {
+        Rect::new(
+            popup.x + 2,
+            popup.y + offset,
+            popup.width.saturating_sub(4),
+            1,
+        )
+        .intersection(popup.inner(ratatui::layout::Margin::new(1, 1)))
+    })
+}
 fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
     frame.render_widget(Clear, popup);
-    frame.render_widget(panel("通信・要求予算 · 次回の保存から適用", true), popup);
+    frame.render_widget(panel("保存設定 · Tabで移動 / Enterで記憶", true), popup);
     let inner = popup.inner(ratatui::layout::Margin::new(1, 1));
     let (legacy, balanced, budget, presets, apply) = settings_controls(popup);
     let row = |offset| {
@@ -1722,29 +1877,44 @@ fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
         app.settings_focus == 3,
         "",
     );
-    frame.render_widget(
-        Paragraph::new("秒数は分離時に適用 · 0.1〜3600秒").style(Style::default().fg(MUTED)),
-        row(10),
-    );
+    for (i, (rect, text)) in text_settings_controls(popup)
+        .into_iter()
+        .zip([
+            format!("並列: {}作品  ← / → で変更（1〜8）", app.settings_jobs),
+            format!(
+                "保存: {}  ← / → で切替",
+                if app.settings_text_only {
+                    "本文のみ TXT"
+                } else {
+                    "標準アーカイブ"
+                }
+            ),
+        ])
+        .enumerate()
+    {
+        frame.render_widget(
+            Paragraph::new(text).style(Style::default().fg(if app.settings_focus == i + 4 {
+                CYAN
+            } else {
+                MUTED
+            })),
+            rect,
+        );
+    }
     editor(
         frame,
         budget,
         &app.settings_budget,
-        "要求予算 · 1〜100000回",
+        "要求予算 · 1〜1000000回",
         app.settings_focus == 1,
         "",
     );
     for (rect, label) in presets
         .into_iter()
-        .zip(["[F1 500]", "[F2 5000]", "[F3 20000]"])
+        .zip(["[F1 500]", "[F2 5000]", "[F3 100万]"])
     {
         frame.render_widget(Paragraph::new(label).style(Style::default().fg(CYAN)), rect);
     }
-    frame.render_widget(
-        Paragraph::new("Tab: 移動 / Ctrl+A: 数値消去 / Esc: 取消")
-            .style(Style::default().fg(MUTED)),
-        row(11),
-    );
     if let Some(error) = &app.settings_error {
         frame.render_widget(
             Paragraph::new(error.as_str()).style(Style::default().fg(Color::Yellow)),
@@ -1752,7 +1922,7 @@ fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
         );
     }
     frame.render_widget(
-        Paragraph::new("[Enter 適用]").style(Style::default().fg(CYAN)),
+        Paragraph::new("[Enter 保存]").style(Style::default().fg(CYAN)),
         apply,
     );
 }
@@ -2094,7 +2264,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         }
         frame.render_widget(Clear, popup);
         let text = if app.modal == Modal::Help {
-            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者・タグ検索URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 通信と要求予算 / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n列挙中の予算切れ・取消もF11で続行。条件による未達は元URLで再確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜8\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
+            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者・タグ検索URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 保存モード・並列・通信・予算（設定を記憶） / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n列挙中の予算切れ・取消もF11で続行。条件による未達は元URLで再確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜8\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
         } else if app.modal == Modal::Collection {
             app.collection_details()
         } else if app.modal == Modal::Update {
@@ -2102,7 +2272,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         } else if app.modal == Modal::Result {
             app.summary()
         } else {
-            format!("{}\n\n対象: {}\n保存先: {}\n並行保存: {}作品\n通信: {}\n要求予算: {}回（F10で変更）\n\n{}\n\nEnter: 保存開始    Esc: 入力へ戻る",if app.demo{"合成データを保存します · 通信なし"}else{"Pixivへ匿名で接続します"},if app.confirm_resume { "最新の保存対象一覧から再開（job / plan）".into() }else{format!("入力{}件（作者・タグ検索URLは作品一覧へ展開）",app.urls.value.split_whitespace().count())},clean(&app.out.value),app.jobs,profile_label(app.balanced, app.interval, app.api_interval),app.request_budget,if app.demo{"デモ保存は実作品の取得を検証するものではありません。"}else{"拒否応答では新規要求を停止します。予算到達時は進行中の正常な保存を確定します。"})
+            format!("{}\n\n対象: {}\n保存先: {}\n保存方式: {}\n並行保存: {}作品\n通信: {}\n要求予算: {}回（F10で変更）\n\n{}\n\nEnter: 保存開始    Esc: 入力へ戻る",if app.demo{"合成データを保存します · 通信なし"}else{"Pixivへ匿名で接続します"},if app.confirm_resume { "最新の保存対象一覧から再開（job / plan）".into() }else{format!("入力{}件（作者・タグ検索URLは作品一覧へ展開）",app.urls.value.split_whitespace().count())},clean(&app.out.value),if app.text_only { "本文のみ TXT（novel/novel_ID.txt）" } else { "標準アーカイブ" },app.jobs,profile_label(app.balanced, app.interval, app.api_interval),app.request_budget,if app.demo{"デモ保存は実作品の取得を検証するものではありません。"}else{"拒否応答では新規要求を停止します。予算到達時は進行中の正常な保存を確定します。"})
         };
         frame.render_widget(
             Paragraph::new(text)
@@ -2142,6 +2312,10 @@ pub fn run(automatic_updates: bool) -> Result<()> {
         let _input_modes = InputModes;
         execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
         let mut app = App::default();
+        match settings::path() {
+            Ok(path) => app.load_preferences(path),
+            Err(error) => app.log(format!("設定を記憶できません: {error}")),
+        }
         app.automatic_updates = automatic_updates;
         if automatic_updates {
             app.check_update();
@@ -2180,6 +2354,7 @@ pub fn run(automatic_updates: bool) -> Result<()> {
             w.stop.store(true, Ordering::SeqCst);
             let _ = w.handle.join();
         }
+        app.save_preferences(&app.preferences(), false)?;
         Ok(app.show_update_command)
     })();
     ratatui::restore();
@@ -2240,7 +2415,7 @@ mod tests {
         assert!(app.modal == Modal::Settings);
         assert!(app.settings_error.is_some());
         assert_eq!(app.request_budget, 20_000);
-        app.settings_budget = Editor::new("100001");
+        app.settings_budget = Editor::new("1000001");
         app.apply_settings();
         assert!(app.modal == Modal::Settings);
         app.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
@@ -2258,6 +2433,120 @@ mod tests {
         app.settings_budget = Editor::new("9");
         app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.request_budget, 5000);
+    }
+    #[test]
+    fn f10_persists_parallel_mode_budget_and_output_across_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let out = temp.path().join("saved-archive");
+        let mut app = App::default();
+        app.load_preferences(path.clone());
+        app.out = Editor::new(&out.to_string_lossy());
+        app.urls = Editor::new("novel:1004");
+        app.open_settings();
+        app.settings_budget = Editor::new("");
+        app.settings_focus = 1;
+        for c in "1000000".chars() {
+            app.settings_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(app.settings_budget.value, "1000000");
+        app.settings_focus = 4;
+        app.settings_key(KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE));
+        app.settings_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.settings_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!app.text_only);
+        app.settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.modal == Modal::None);
+        let mut restarted = App::default();
+        restarted.load_preferences(path.clone());
+        assert_eq!(restarted.jobs, 8);
+        assert!(restarted.text_only);
+        assert_eq!(restarted.request_budget, MAX_REQUEST_BUDGET);
+        assert_eq!(PathBuf::from(&restarted.out.value), out);
+        let options = restarted.options_for(true).unwrap();
+        assert_eq!(options.jobs, 8);
+        assert!(options.text_only);
+        assert_eq!(options.request_budget, MAX_REQUEST_BUDGET);
+        let saved = std::fs::read_to_string(path).unwrap();
+        assert!(!saved.contains("novel:1004"));
+        restarted.open_settings();
+        restarted.settings_text_only = false;
+        restarted.settings_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(restarted.text_only);
+    }
+    #[test]
+    fn settings_write_failure_does_not_apply_unsaved_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("not-a-directory");
+        std::fs::write(&path, "file").unwrap();
+        let mut app = App::default();
+        app.settings_path = Some(path.join("settings.json"));
+        app.open_settings();
+        app.settings_jobs = 8;
+        app.apply_settings();
+        assert_eq!(app.jobs, 2);
+        assert!(app.modal == Modal::Settings);
+        assert!(app.settings_error.is_some());
+    }
+    #[test]
+    fn damaged_settings_are_preserved_until_f10_confirmation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        std::fs::write(&path, "{broken").unwrap();
+        let mut app = App::default();
+        app.load_preferences(path.clone());
+        assert!(app.save_preferences(&app.preferences(), false).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        app.open_settings();
+        app.apply_settings();
+        assert!(!app.settings_load_failed);
+        assert!(Settings::load(&path).is_ok());
+    }
+    #[test]
+    fn text_only_paste_confirm_save_and_f11_skip_existing_txt() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("archive");
+        std::fs::create_dir_all(out.join("novel")).unwrap();
+        std::fs::write(out.join("novel/novel_1004.txt"), "既存本文").unwrap();
+        let mut app = App::default();
+        app.demo = true;
+        app.out = Editor::new(out.to_str().unwrap());
+        app.urls = Editor::new("https://www.pixiv.net/novel/show.php?id=1004");
+        app.open_settings();
+        app.settings_text_only = true;
+        app.settings_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        app.settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.request_budget, MAX_REQUEST_BUDGET);
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(app.modal == Modal::Confirm);
+        let mut terminal = Terminal::new(TestBackend::new(100, 36)).unwrap();
+        terminal.draw(|frame| draw(frame, &app, false)).unwrap();
+        assert!(screen_text(&terminal).contains("本文のみ TXT"));
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        finish(&mut app);
+        assert_eq!(app.last.as_ref().unwrap()["already_complete"], 1);
+        assert_eq!(app.last.as_ref().unwrap()["requests"], 0);
+        assert_eq!(
+            app.folder(true).unwrap(),
+            out.canonicalize().unwrap().join("novel")
+        );
+        app.key(KeyEvent::new(KeyCode::F(11), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        finish(&mut app);
+        assert_eq!(app.last.as_ref().unwrap()["requests"], 0);
+        assert_eq!(app.last.as_ref().unwrap()["already_complete"], 1);
+    }
+    #[test]
+    fn novel_rows_open_the_text_only_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("novel")).unwrap();
+        std::fs::write(temp.path().join("novel/novel_1004.txt"), "本文").unwrap();
+        let row = WorkRow::new(
+            "novel_1004".into(),
+            "already_complete".into(),
+            Some(temp.path()),
+        );
+        assert_eq!(row.output, Some(temp.path().join("novel")));
     }
     #[test]
     fn custom_intervals_are_validated_before_settings_are_applied() {

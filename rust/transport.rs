@@ -15,6 +15,7 @@ use std::{
 use url::Url;
 
 pub const DEMO: &str = include_str!("../examples/synthetic-fixture.json");
+pub const MAX_REQUEST_BUDGET: usize = 1_000_000;
 pub trait Transport: Send + Sync {
     fn api(&self, path: &str, query: &[(&str, String)]) -> Result<Value>;
     fn download(&self, url: &str, path: &Path) -> Result<()>;
@@ -277,11 +278,11 @@ impl Online {
             || !(minimum..=3600.0).contains(&interval)
             || !api_interval.is_finite()
             || !(0.1..=3600.0).contains(&api_interval)
-            || !(1..=100000).contains(&budget)
+            || !(1..=MAX_REQUEST_BUDGET).contains(&budget)
             || max_bytes == 0
         {
             return Err(invalid(
-                "Use a valid profile interval and request budget 1–100000",
+                "Use a valid profile interval and request budget 1–1000000",
             ));
         }
         let http = Http::builder()
@@ -1095,7 +1096,13 @@ mod tests {
         assert!(validate_url("https://www.pixiv.net/ajax/illust/1", false).is_ok());
         assert!(Online::new(1.0, 500, 1024, Arc::default()).is_err());
         assert!(Online::with_profile(1.0, 20000, 1024, Arc::default(), true, 2.0).is_ok());
-        assert!(Online::with_profile(1.0, 100001, 1024, Arc::default(), true, 2.0).is_err());
+        assert!(
+            Online::with_profile(1.0, MAX_REQUEST_BUDGET + 1, 1024, Arc::default(), true, 2.0)
+                .is_err()
+        );
+        assert!(
+            Online::with_profile(1.0, MAX_REQUEST_BUDGET, 1024, Arc::default(), true, 2.0).is_ok()
+        );
     }
     #[test]
     fn fixture_cancel_query_encoding_and_atomic_budget() {

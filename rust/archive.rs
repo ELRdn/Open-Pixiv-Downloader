@@ -17,6 +17,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "novel_text.rs"]
+mod text;
+
 pub fn now() -> String {
     Utc::now().to_rfc3339()
 }
@@ -204,6 +207,7 @@ pub fn discover(client: &dyn Transport, target: &Target, types: &str) -> Result<
 
 pub struct Archive {
     pub root: PathBuf,
+    pub text_only: bool,
     db: Mutex<Connection>,
     lock: PathBuf,
     _guard: File,
@@ -254,9 +258,10 @@ impl Archive {
         drop(sentinel);
         let result = (|| {
             let db = Connection::open(safe_path(&root, "state.sqlite3")?)?;
-            db.execute_batch("CREATE TABLE IF NOT EXISTS works(kind TEXT NOT NULL,id TEXT NOT NULL,status TEXT NOT NULL,updated_at TEXT NOT NULL,reason TEXT,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS search_pages(scope TEXT NOT NULL,request TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(scope,request));")?;
+            db.execute_batch("CREATE TABLE IF NOT EXISTS works(kind TEXT NOT NULL,id TEXT NOT NULL,status TEXT NOT NULL,updated_at TEXT NOT NULL,reason TEXT,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS search_pages(scope TEXT NOT NULL,request TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(scope,request)); CREATE TABLE IF NOT EXISTS novel_text(id TEXT PRIMARY KEY,sha256 TEXT NOT NULL,bytes INTEGER NOT NULL);")?;
             Ok(Self {
                 root,
+                text_only: false,
                 db: Mutex::new(db),
                 lock: lock.clone(),
                 _guard: guard,
@@ -464,6 +469,9 @@ impl Archive {
         errors
     }
     pub fn complete(&self, target: &Target) -> Result<bool> {
+        if self.text_only {
+            return self.text_complete(target);
+        }
         Ok(self.status(target)?.as_deref() == Some("complete")
             && self
                 .manifest(target)
@@ -482,6 +490,14 @@ impl Archive {
 
     /// Commit usable local text before any cover or inserted-image request.
     pub fn prepare(&self, target: &Target, client: &dyn Transport) -> Result<String> {
+        if self.text_only {
+            return match self.prepare_text(target, client) {
+                Ok(status) if matches!(status.as_str(), "complete" | "already_complete") => {
+                    Ok(status)
+                }
+                result => self.stage_result(target, client, result),
+            };
+        }
         if self.complete(target)? {
             return Ok("already_complete".into());
         }
@@ -994,6 +1010,14 @@ impl Archive {
                 problems.push(json!({"key":t.key(),"errors":errors}));
             }
         }
+        for target in self.text_targets()? {
+            checked += 1;
+            if self.text_matches(&target)? {
+                valid += 1;
+            } else {
+                problems.push(json!({"key":target.key(),"errors":["本文TXTが見つからないか変更されています"]}));
+            }
+        }
         Ok(json!({"checked":checked,"valid":valid,"problems":problems}))
     }
     pub fn pack(&self, destination: &Path) -> Result<Value> {
@@ -1018,6 +1042,7 @@ impl Archive {
         }
         let mut file = tempfile::NamedTempFile::new_in(destination.parent().unwrap())?;
         let mut included = Vec::new();
+        let mut included_keys = HashSet::new();
         {
             let mut zip = zip::ZipWriter::new(file.as_file_mut());
             let options = zip::write::SimpleFileOptions::default()
@@ -1039,7 +1064,15 @@ impl Archive {
                     zip.start_file(format!("works/{}/{name}", t.key()), options)?;
                     std::io::copy(&mut File::open(self.path(&t, name)?)?, &mut zip)?;
                 }
+                included_keys.insert(t.key());
                 included.push(t.key());
+            }
+            for target in self.text_targets()? {
+                zip.start_file(format!("novel/{}.txt", target.key()), options)?;
+                std::io::copy(&mut File::open(self.text_path(&target)?)?, &mut zip)?;
+                if included_keys.insert(target.key()) {
+                    included.push(target.key());
+                }
             }
             if included.is_empty() {
                 return Err(invalid("There are no complete works to export"));
