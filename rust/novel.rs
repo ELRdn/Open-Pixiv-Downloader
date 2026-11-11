@@ -175,15 +175,16 @@ fn inline_token(t: &Token<'_>, depth: usize) -> String {
         _ => escape(t.raw),
     }
 }
-fn plain(text: &str, depth: usize) -> String {
+fn plain(text: &str, depth: usize, body_only: bool) -> String {
     if depth >= 16 {
         return text.into();
     }
     tokens(text)
         .iter()
         .map(|t| match t.kind {
-            "rb" | "b" | "i" | "emphasismark" => plain(t.value, depth + 1),
-            "chapter" => format!("\n\n{}\n\n", plain(t.value, depth + 1)),
+            "rb" | "b" | "i" | "emphasismark" => plain(t.value, depth + 1, body_only),
+            "chapter" => format!("\n\n{}\n\n", plain(t.value, depth + 1, body_only)),
+            "pixivimage" | "uploadedimage" if body_only => String::new(),
             "newpage" => "\n\n".into(),
             "jumpuri" => format!("{} ({})", t.value, t.extra),
             "jump" => format!("[{}ページへ]", t.value),
@@ -192,7 +193,10 @@ fn plain(text: &str, depth: usize) -> String {
         .collect()
 }
 pub fn plain_text(text: &str) -> String {
-    plain(text, 0)
+    plain(text, 0, false)
+}
+pub fn body_text(text: &str) -> String {
+    plain(text, 0, true)
 }
 pub fn image_refs(text: &str) -> Vec<String> {
     let mut seen = HashSet::new();

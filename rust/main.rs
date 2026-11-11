@@ -6,6 +6,7 @@ mod jobs;
 mod media;
 mod novel;
 mod search;
+mod settings;
 mod target;
 mod transport;
 mod tui;
@@ -95,12 +96,15 @@ struct FetchArgs {
     /// Resume the saved job targets instead of discovering the author again
     #[arg(long)]
     resume: bool,
-    #[arg(long, default_value_t = 20_000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    #[arg(long, default_value_t = 20_000, value_parser = clap::value_parser!(u32).range(1..=transport::MAX_REQUEST_BUDGET as i64))]
     request_budget: u32,
     #[arg(long, default_value_t = 256)]
     max_file_mib: u64,
     #[arg(long)]
     retry_unavailable: bool,
+    /// Save only novel body TXT, without covers, inserted images or per-work JSON/HTML
+    #[arg(long)]
+    text_only: bool,
 }
 impl From<FetchArgs> for Options {
     fn from(a: FetchArgs) -> Self {
@@ -122,6 +126,7 @@ impl From<FetchArgs> for Options {
             request_budget: a.request_budget as usize,
             max_file_mib: a.max_file_mib,
             retry_unavailable: a.retry_unavailable,
+            text_only: a.text_only,
         }
     }
 }
@@ -264,7 +269,7 @@ mod cli_tests {
         assert!(resumed.resume);
         assert!(resumed.targets.is_empty());
         assert_eq!(resumed.request_budget, 20_000);
-        for value in ["0", "100001"] {
+        for value in ["0", "1000001"] {
             assert!(Cli::try_parse_from([
                 "opixiv",
                 "fetch",
