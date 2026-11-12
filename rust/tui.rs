@@ -2726,7 +2726,13 @@ mod tests {
         app.out = Editor::new(out.to_str().unwrap());
         app.start("fetch");
         finish(&mut app);
-        assert_eq!(app.rows.len(), 4);
+        assert_eq!(
+            app.rows.len(),
+            4,
+            "result={:?}; logs={:?}",
+            app.last,
+            app.logs
+        );
         let novel = out.join("works/novel/novel_1004.txt");
         assert!(novel.is_file());
         std::fs::remove_file(&novel).unwrap();
@@ -2941,7 +2947,13 @@ mod tests {
         app.out = Editor::new(out.to_str().unwrap());
         app.start("fetch");
         finish(&mut app);
-        assert_eq!(app.rows.len(), 4);
+        assert_eq!(
+            app.rows.len(),
+            4,
+            "result={:?}; logs={:?}",
+            app.last,
+            app.logs
+        );
         assert!(app
             .rows
             .iter()

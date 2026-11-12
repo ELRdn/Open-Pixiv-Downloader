@@ -65,7 +65,10 @@ impl Archive {
 
     pub fn text_complete(&self, target: &Target) -> Result<bool> {
         let path = self.text_path(target)?;
-        if self.text_record(target)?.is_some() {
+        if let Some((_, bytes)) = self.text_record(target)? {
+            if bytes < self.min_text_bytes {
+                return Ok(false);
+            }
             return self.text_matches(target);
         }
         if !path.try_exists()? {
@@ -86,16 +89,40 @@ impl Archive {
             Err(error) => return Err(error),
         };
         let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+        if (text.len() as u64) < self.min_text_bytes {
+            return Ok(false);
+        }
         self.remember_text(target, &hash, text.len() as u64)?;
         Ok(true)
     }
 
+    fn skip_short_text(&self, target: &Target, bytes: u64) -> Result<String> {
+        self.state(
+            target,
+            "skipped",
+            Some(&format!(
+                "Novel TXT excluded by minimum size policy: {bytes} < {} bytes",
+                self.min_text_bytes
+            )),
+        )?;
+        Ok("skipped".into())
+    }
+
     pub(super) fn prepare_text(&self, target: &Target, client: &dyn Transport) -> Result<String> {
+        let path = self.text_path(target)?;
+        if let Some((_, bytes)) = self.text_record(target)? {
+            if bytes < self.min_text_bytes {
+                return self.skip_short_text(target, bytes);
+            }
+        }
         if self.text_complete(target)? {
             return Ok("already_complete".into());
         }
-        let path = self.text_path(target)?;
         if path.try_exists()? {
+            let bytes = fs::metadata(&path)?.len();
+            if bytes < self.min_text_bytes {
+                return self.skip_short_text(target, bytes);
+            }
             return Err(invalid("既存の本文TXTが空・不正・変更済みです。上書きせず保持しました。別の場所へ移してから再開してください。"));
         }
         let mut local = None;
@@ -126,6 +153,7 @@ impl Archive {
         } else {
             let body = client.api(&format!("/ajax/novel/{}", target.id), &[])?;
             if !eligible(&body) {
+                self.state(target, "skipped", None)?;
                 return Ok("skipped".into());
             }
             if body["id"] != target.id {
@@ -137,8 +165,11 @@ impl Archive {
         if text.trim().is_empty() || text.contains('\0') {
             return Err(invalid("Novel has no usable text body"));
         }
-        let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
         let bytes = text.len() as u64;
+        if bytes < self.min_text_bytes {
+            return self.skip_short_text(target, bytes);
+        }
+        let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
         if self
             .text_record(target)?
             .is_some_and(|expected| expected != (hash.clone(), bytes))
