@@ -271,14 +271,29 @@ fn user_date_bounds_and_leap_day_are_inclusive_in_either_order() {
 }
 
 #[test]
-fn more_than_300_works_on_one_day_is_explicitly_incomplete() {
+fn both_date_windows_cover_a_crowded_day_without_losing_order_or_ids() {
+    for order in ["date", "date_d"] {
+        for total in [301, 315, 600] {
+            for bounds in ["", "&scd=2024-02-29&ecd=2024-02-29"] {
+                let client = CappedSearch::new("2024-02-29", total, total);
+                let targets =
+                    discover(&client, &format!("{SOURCE}?order={order}{bounds}"), "novel").unwrap();
+                assert_ids(&targets, 1..=total, order);
+                client.assert_request_limits();
+            }
+        }
+    }
+}
+
+#[test]
+fn more_than_both_date_windows_on_one_day_is_explicitly_incomplete() {
     for order in ["date", "date_d"] {
         for bounds in ["", "&scd=2024-02-29&ecd=2024-02-29"] {
-            let client = CappedSearch::new("2024-02-29", 301, 301);
+            let client = CappedSearch::new("2024-02-29", 601, 601);
             let error = discover(&client, &format!("{SOURCE}?order={order}{bounds}"), "novel")
                 .unwrap_err()
                 .to_string();
-            for detail in ["incomplete", "2024-02-29", "300", "301"] {
+            for detail in ["incomplete", "2024-02-29", "600", "601"] {
                 assert!(error.contains(detail), "{error}");
             }
             client.assert_request_limits();
