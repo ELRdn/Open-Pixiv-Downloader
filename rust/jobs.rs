@@ -954,7 +954,7 @@ mod tests {
 
     #[test]
     fn novel_minimum_size_uses_utf8_bytes_and_skips_persist_across_resume() {
-        for bytes in [1023, 1024] {
+        for bytes in [0, 1023, 1024] {
             let temp = tempfile::tempdir().unwrap();
             let out = temp.path().join("archive");
             fs::create_dir(&out).unwrap();
@@ -964,11 +964,15 @@ mod tests {
             )
             .unwrap();
             let mut fixture: Value = serde_json::from_str(DEMO).unwrap();
-            let text = format!(
-                "{}{}",
-                "あ".repeat(341),
-                if bytes == 1024 { "a" } else { "" }
-            );
+            let text = if bytes == 0 {
+                String::new()
+            } else {
+                format!(
+                    "{}{}",
+                    "あ".repeat(341),
+                    if bytes == 1024 { "a" } else { "" }
+                )
+            };
             assert_eq!(text.len(), bytes);
             fixture["responses"]["/ajax/novel/1004"]["content"] = json!(text);
             let fixture_path = temp.path().join("fixture.json");
@@ -984,7 +988,7 @@ mod tests {
             let first = run(options.clone(), false, Arc::default(), |_| {}).unwrap();
             assert_eq!(first["requests"], 1);
             let path = out.join("novel/novel_1004.txt");
-            if bytes == 1023 {
+            if bytes < 1024 {
                 assert_eq!(first["counts"]["skipped"], 1);
                 assert!(!path.exists());
                 let archive = Archive::open(&out, true).unwrap();
@@ -992,7 +996,7 @@ mod tests {
                     .reason(&Target::new("novel", "1004").unwrap())
                     .unwrap()
                     .unwrap()
-                    .contains("1023 < 1024"));
+                    .contains(&format!("{bytes} < 1024")));
             } else {
                 assert_eq!(first["counts"]["complete"], 1);
                 assert_eq!(fs::read(&path).unwrap().len(), 1024);
@@ -1011,7 +1015,7 @@ mod tests {
             assert_eq!(second["requests"], 0);
             assert_eq!(
                 second["previous_exclusions"],
-                if bytes == 1023 { 1 } else { 0 }
+                if bytes < 1024 { 1 } else { 0 }
             );
             assert_eq!(
                 second["already_complete"],

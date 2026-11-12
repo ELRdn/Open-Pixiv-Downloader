@@ -162,12 +162,12 @@ impl Archive {
             str_at(&body, "content")?.to_owned()
         };
         let text = novel::body_text(&content);
-        if text.trim().is_empty() || text.contains('\0') {
-            return Err(invalid("Novel has no usable text body"));
-        }
         let bytes = text.len() as u64;
         if bytes < self.min_text_bytes {
             return self.skip_short_text(target, bytes);
+        }
+        if text.trim().is_empty() || text.contains('\0') {
+            return Err(invalid("Novel has no usable text body"));
         }
         let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
         if self
