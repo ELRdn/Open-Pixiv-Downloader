@@ -584,31 +584,44 @@ impl Online {
         result
     }
     fn api_validated(&self, url: Url) -> Result<Value> {
-        let opened = self
-            .open_validated(url, false)
-            .map_err(|error| match error {
-                Error::Missing { status } => {
-                    Error::Unavailable(format!("HTTP {status}; resource unavailable"))
+        for attempt in 0..3 {
+            let result = (|| {
+                let opened = (if attempt == 0 {
+                    self.open_validated(url.clone(), false)
+                } else {
+                    self.open_attempt(url.clone(), false, true)
+                })
+                .map_err(|error| match error {
+                    Error::Missing { status } => {
+                        Error::Unavailable(format!("HTTP {status}; resource unavailable"))
+                    }
+                    other => other,
+                })?;
+                let mut bytes = Vec::new();
+                self.read(opened, &mut bytes, 16 * 1024 * 1024, false)?;
+                let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+                    self.stop_error(
+                        StopReason::UnexpectedContent,
+                        "Expected JSON; incompatible response",
+                    )
+                })?;
+                if !value.is_object() || value.get("error").is_none() || value.get("body").is_none()
+                {
+                    return Err(invalid("API envelope changed"));
                 }
-                other => other,
-            })?;
-        let mut bytes = Vec::new();
-        self.read(opened, &mut bytes, 16 * 1024 * 1024, false)?;
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
-            self.stop_error(
-                StopReason::UnexpectedContent,
-                "Expected JSON; incompatible response",
-            )
-        })?;
-        if !value.is_object() || value.get("error").is_none() || value.get("body").is_none() {
-            return Err(invalid("API envelope changed"));
+                if value["error"] != false {
+                    return Err(Error::Unavailable(
+                        "API reports inaccessible resource".into(),
+                    ));
+                }
+                Ok(value["body"].clone())
+            })();
+            match result {
+                Err(Error::Retryable(_)) if attempt < 2 => self.wait_retry(attempt + 1)?,
+                other => return other,
+            }
         }
-        if value["error"] != false {
-            return Err(Error::Unavailable(
-                "API reports inaccessible resource".into(),
-            ));
-        }
-        Ok(value["body"].clone())
+        unreachable!()
     }
     fn download_validated(&self, url: Url, path: &Path) -> Result<()> {
         std::fs::create_dir_all(path.parent().unwrap())?;
@@ -1004,6 +1017,64 @@ mod tests {
         assert_eq!(std::fs::read(&out).unwrap(), b"body");
         assert_eq!(client.requests(), 2);
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        server.join().unwrap();
+    }
+    #[test]
+    fn api_retry_is_finite_counted_and_respects_denial_and_budget() {
+        let (url, server) = server(503, "bad", 3);
+        let client = client(10);
+        assert!(matches!(
+            client.api_validated(url),
+            Err(Error::Retryable(_))
+        ));
+        assert_eq!(client.requests(), 3);
+        assert_eq!(client.metrics()["retries"], 2);
+        server.join().unwrap();
+        for status in [401, 403, 429, 302] {
+            let (url, server) = self::server(status, "denied", 1);
+            let client = self::client(10);
+            assert!(matches!(client.api_validated(url), Err(Error::Stop(_))));
+            assert_eq!(client.requests(), 1);
+            assert_eq!(client.metrics()["retries"], 0);
+            server.join().unwrap();
+        }
+        let (url, server) = self::server(503, "bad", 1);
+        let client = self::client(1);
+        assert!(matches!(client.api_validated(url), Err(Error::Budget)));
+        assert_eq!(client.requests(), 1);
+        assert_eq!(client.metrics()["retries"], 0);
+        server.join().unwrap();
+    }
+    #[test]
+    fn api_retry_discards_incomplete_json_before_recovering() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = std::thread::spawn(move || {
+            for (attempt, stream) in listener.incoming().take(2).enumerate() {
+                let mut stream = stream.unwrap();
+                headers(&mut stream);
+                if attempt == 0 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+                        )
+                        .unwrap();
+                } else {
+                    let body = br#"{"error":false,"body":{"ok":true}}"#;
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(body).unwrap();
+                }
+            }
+        });
+        let client = client(10);
+        assert_eq!(client.api_validated(url).unwrap(), json!({"ok":true}));
+        assert_eq!(client.requests(), 2);
+        assert_eq!(client.metrics()["retries"], 1);
         server.join().unwrap();
     }
     #[test]

@@ -266,68 +266,84 @@ pub fn discover_with(
             let mut dates = Vec::new();
             let mut expected = 0;
             let mut complete = false;
-            for page in 1..=MAX_WORKS {
-                if client.stopped() {
-                    return Err(Error::Stop("Stopped while listing search results".into()));
-                }
-                query.last_mut().unwrap().1 = page.to_string();
-                let body = fetch(&format!("/ajax/search/{endpoint}/{tag}"), &query, node)?;
-                let result = &body[node];
-                let entries = result["data"]
-                    .as_array()
-                    .ok_or_else(|| invalid("Tag-search result schema changed"))?;
-                let total = result["total"]
-                    .as_u64()
-                    .ok_or_else(|| invalid("Missing tag-search total"))?;
-                expected = expected.max(total);
-                if expected > MAX_WORKS as u64 {
-                    return Err(invalid("Search exceeds 1000000 works; narrow the search"));
-                }
-                let before = range_seen.len();
-                for item in entries {
-                    if item["isAdContainer"] == true {
-                        continue;
+            for reverse in [false, true] {
+                let before_reverse = found.len();
+                if reverse {
+                    if complete || start.is_none() || start != end {
+                        break;
                     }
-                    let id = item["id"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| item["id"].to_string());
-                    let target = Target::new(kind, &id)?;
-                    if let Some(date) = result_date(item)? {
-                        if start.is_some_and(|start| date < start)
-                            || end.is_some_and(|end| date > end)
-                        {
-                            return Err(invalid(
-                                "Search returned a work outside the requested date range",
-                            ));
-                        }
-                        dates.push(date);
+                    // shortcut: two public date windows per day, narrow further if their union is incomplete.
+                    let order = query.iter_mut().find(|(key, _)| *key == "order").unwrap();
+                    order.1 = if order.1 == "date" { "date_d" } else { "date" }.into();
+                }
+                let mut page_seen = HashSet::new();
+                for page in 1..=MAX_WORKS {
+                    if client.stopped() {
+                        return Err(Error::Stop("Stopped while listing search results".into()));
                     }
-                    if range_seen.insert(target.clone()) {
-                        found.push(target);
-                    }
-                }
-                progress(format!(
-                    "検索列挙: 確定 {}件 / 今の区間 {}/{}件 · {}〜{} · {page}ページ",
-                    refs.len(),
-                    found.len(),
-                    expected,
-                    start.map_or_else(|| "開始指定なし".into(), |d| d.to_string()),
-                    end.map_or_else(|| "終了指定なし".into(), |d| d.to_string())
-                ));
-                if found.len() as u64 > expected {
-                    return Err(invalid("Tag-search total changed; run the search again"));
-                }
-                if found.len() as u64 == expected {
-                    complete = true;
-                    break;
-                }
-                if range_seen.len() == before
-                    || result["lastPage"]
+                    query.last_mut().unwrap().1 = page.to_string();
+                    let body = fetch(&format!("/ajax/search/{endpoint}/{tag}"), &query, node)?;
+                    let result = &body[node];
+                    let entries = result["data"]
+                        .as_array()
+                        .ok_or_else(|| invalid("Tag-search result schema changed"))?;
+                    let total = result["total"]
                         .as_u64()
-                        .is_some_and(|last| page as u64 >= last)
-                {
-                    break;
+                        .ok_or_else(|| invalid("Missing tag-search total"))?;
+                    expected = expected.max(total);
+                    if expected > MAX_WORKS as u64 {
+                        return Err(invalid("Search exceeds 1000000 works; narrow the search"));
+                    }
+                    let before = page_seen.len();
+                    for item in entries {
+                        if item["isAdContainer"] == true {
+                            continue;
+                        }
+                        let id = item["id"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| item["id"].to_string());
+                        let target = Target::new(kind, &id)?;
+                        page_seen.insert(target.clone());
+                        if let Some(date) = result_date(item)? {
+                            if start.is_some_and(|start| date < start)
+                                || end.is_some_and(|end| date > end)
+                            {
+                                return Err(invalid(
+                                    "Search returned a work outside the requested date range",
+                                ));
+                            }
+                            dates.push(date);
+                        }
+                        if range_seen.insert(target.clone()) {
+                            found.push(target);
+                        }
+                    }
+                    progress(format!(
+                        "検索列挙: 確定 {}件 / 今の区間 {}/{}件 · {}〜{} · {page}ページ",
+                        refs.len(),
+                        found.len(),
+                        expected,
+                        start.map_or_else(|| "開始指定なし".into(), |d| d.to_string()),
+                        end.map_or_else(|| "終了指定なし".into(), |d| d.to_string())
+                    ));
+                    if found.len() as u64 > expected {
+                        return Err(invalid("Tag-search total changed; run the search again"));
+                    }
+                    if found.len() as u64 == expected {
+                        complete = true;
+                        break;
+                    }
+                    if page_seen.len() == before
+                        || result["lastPage"]
+                            .as_u64()
+                            .is_some_and(|last| page as u64 >= last)
+                    {
+                        break;
+                    }
+                }
+                if reverse {
+                    found[before_reverse..].reverse();
                 }
             }
             if complete {
