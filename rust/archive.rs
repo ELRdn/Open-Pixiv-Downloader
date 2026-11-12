@@ -208,6 +208,7 @@ pub fn discover(client: &dyn Transport, target: &Target, types: &str) -> Result<
 pub struct Archive {
     pub root: PathBuf,
     pub text_only: bool,
+    min_text_bytes: u64,
     db: Mutex<Connection>,
     lock: PathBuf,
     _guard: File,
@@ -257,11 +258,28 @@ impl Archive {
         })?;
         drop(sentinel);
         let result = (|| {
+            let policy_path = safe_path(&root, "novel-policy.json")?;
+            let min_text_bytes = if policy_path.try_exists()? {
+                if fs::metadata(&policy_path)?.len() > 32 * 1024 {
+                    return Err(invalid("Novel policy exceeds 32 KiB"));
+                }
+                let policy: Value = serde_json::from_slice(&fs::read(policy_path)?)?;
+                if policy["schema_version"] != 1 {
+                    return Err(invalid("Unsupported novel policy schema"));
+                }
+                policy["min_bytes"]
+                    .as_u64()
+                    .filter(|bytes| *bytes <= 64 * 1024 * 1024)
+                    .ok_or_else(|| invalid("Novel minimum size must be 0..=67108864 bytes"))?
+            } else {
+                0
+            };
             let db = Connection::open(safe_path(&root, "state.sqlite3")?)?;
             db.execute_batch("CREATE TABLE IF NOT EXISTS works(kind TEXT NOT NULL,id TEXT NOT NULL,status TEXT NOT NULL,updated_at TEXT NOT NULL,reason TEXT,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS search_pages(scope TEXT NOT NULL,request TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(scope,request)); CREATE TABLE IF NOT EXISTS novel_text(id TEXT PRIMARY KEY,sha256 TEXT NOT NULL,bytes INTEGER NOT NULL);")?;
             Ok(Self {
                 root,
                 text_only: false,
+                min_text_bytes,
                 db: Mutex::new(db),
                 lock: lock.clone(),
                 _guard: guard,
@@ -492,7 +510,9 @@ impl Archive {
     pub fn prepare(&self, target: &Target, client: &dyn Transport) -> Result<String> {
         if self.text_only {
             return match self.prepare_text(target, client) {
-                Ok(status) if matches!(status.as_str(), "complete" | "already_complete") => {
+                Ok(status)
+                    if matches!(status.as_str(), "complete" | "already_complete" | "skipped") =>
+                {
                     Ok(status)
                 }
                 result => self.stage_result(target, client, result),

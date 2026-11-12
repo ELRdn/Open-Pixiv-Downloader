@@ -953,6 +953,120 @@ mod tests {
     use super::*;
 
     #[test]
+    fn novel_minimum_size_uses_utf8_bytes_and_skips_persist_across_resume() {
+        for bytes in [0, 1023, 1024] {
+            let temp = tempfile::tempdir().unwrap();
+            let out = temp.path().join("archive");
+            fs::create_dir(&out).unwrap();
+            fs::write(
+                out.join("novel-policy.json"),
+                br#"{"schema_version":1,"min_bytes":1024}"#,
+            )
+            .unwrap();
+            let mut fixture: Value = serde_json::from_str(DEMO).unwrap();
+            let text = if bytes == 0 {
+                String::new()
+            } else {
+                format!(
+                    "{}{}",
+                    "あ".repeat(341),
+                    if bytes == 1024 { "a" } else { "" }
+                )
+            };
+            assert_eq!(text.len(), bytes);
+            fixture["responses"]["/ajax/novel/1004"]["content"] = json!(text);
+            let fixture_path = temp.path().join("fixture.json");
+            fs::write(&fixture_path, fixture.to_string()).unwrap();
+            let options = Options {
+                targets: vec!["novel:1004".into()],
+                fixture: Some(fixture_path),
+                text_only: true,
+                all: true,
+                out: out.clone(),
+                ..Default::default()
+            };
+            let first = run(options.clone(), false, Arc::default(), |_| {}).unwrap();
+            assert_eq!(first["requests"], 1);
+            let path = out.join("novel/novel_1004.txt");
+            if bytes < 1024 {
+                assert_eq!(first["counts"]["skipped"], 1);
+                assert!(!path.exists());
+                let archive = Archive::open(&out, true).unwrap();
+                assert!(archive
+                    .reason(&Target::new("novel", "1004").unwrap())
+                    .unwrap()
+                    .unwrap()
+                    .contains(&format!("{bytes} < 1024")));
+            } else {
+                assert_eq!(first["counts"]["complete"], 1);
+                assert_eq!(fs::read(&path).unwrap().len(), 1024);
+            }
+            let second = run(
+                Options {
+                    targets: vec![],
+                    resume: true,
+                    ..options
+                },
+                false,
+                Arc::default(),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(second["requests"], 0);
+            assert_eq!(
+                second["previous_exclusions"],
+                if bytes < 1024 { 1 } else { 0 }
+            );
+            assert_eq!(
+                second["already_complete"],
+                if bytes == 1024 { 1 } else { 0 }
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_policy_excludes_a_known_deleted_short_txt_without_http() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = Options {
+            targets: vec!["novel:1004".into()],
+            demo: true,
+            text_only: true,
+            all: true,
+            out: temp.path().to_owned(),
+            ..Default::default()
+        };
+        let first = run(options.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(first["counts"]["complete"], 1);
+        let path = temp.path().join("novel/novel_1004.txt");
+        assert!(fs::metadata(&path).unwrap().len() < 1024);
+        fs::remove_file(&path).unwrap();
+        fs::write(
+            temp.path().join("novel-policy.json"),
+            br#"{"schema_version":1,"min_bytes":1024}"#,
+        )
+        .unwrap();
+        let second = run(options, false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(second["requests"], 0);
+        assert_eq!(second["counts"]["skipped"], 1);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn invalid_novel_policy_is_rejected_before_fetch() {
+        for policy in [
+            json!({"schema_version":2,"min_bytes":1024}),
+            json!({"schema_version":1,"min_bytes":-1}),
+            json!({"schema_version":1,"min_bytes":"1024"}),
+            json!({"schema_version":1,"min_bytes":67108865}),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            fs::write(temp.path().join("novel-policy.json"), policy.to_string()).unwrap();
+            assert!(Archive::open(temp.path(), false).is_err());
+            assert!(!temp.path().join(".run.lock").exists());
+        }
+    }
+
+    #[test]
     fn text_only_budget_resume_and_existing_txt_use_the_flat_path() {
         let temp = tempfile::tempdir().unwrap();
         let mut fixture: Value = serde_json::from_str(DEMO).unwrap();
