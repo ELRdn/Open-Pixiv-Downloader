@@ -954,7 +954,14 @@ mod tests {
 
     #[test]
     fn novel_minimum_size_uses_utf8_bytes_and_skips_persist_across_resume() {
-        for bytes in [0, 1023, 1024] {
+        for (bytes, with_nul) in [
+            (0, false),
+            (1023, false),
+            (1024, false),
+            (0, true),
+            (1023, true),
+            (1024, true),
+        ] {
             let temp = tempfile::tempdir().unwrap();
             let out = temp.path().join("archive");
             fs::create_dir(&out).unwrap();
@@ -974,7 +981,11 @@ mod tests {
                 )
             };
             assert_eq!(text.len(), bytes);
-            fixture["responses"]["/ajax/novel/1004"]["content"] = json!(text);
+            fixture["responses"]["/ajax/novel/1004"]["content"] = json!(if with_nul {
+                format!("\0{text}\0")
+            } else {
+                text
+            });
             let fixture_path = temp.path().join("fixture.json");
             fs::write(&fixture_path, fixture.to_string()).unwrap();
             let options = Options {
@@ -1000,6 +1011,10 @@ mod tests {
             } else {
                 assert_eq!(first["counts"]["complete"], 1);
                 assert_eq!(fs::read(&path).unwrap().len(), 1024);
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    format!("{}a", "あ".repeat(341))
+                );
             }
             let second = run(
                 Options {
