@@ -153,7 +153,9 @@ impl Archive {
         } else {
             let body = client.api(&format!("/ajax/novel/{}", target.id), &[])?;
             if !eligible(&body) {
-                self.state(target, "skipped", None)?;
+                let reason = (body["isLoginOnly"] == true)
+                    .then_some("Login-only work; unavailable to anonymous downloads");
+                self.state(target, "skipped", reason)?;
                 return Ok("skipped".into());
             }
             if body["id"] != target.id {
@@ -330,6 +332,7 @@ mod tests {
     fn text_only_still_checks_visibility_identity_and_nonempty_content() {
         for (field, value, expected) in [
             ("xRestrict", json!(1), "skipped"),
+            ("isLoginOnly", json!(true), "skipped"),
             ("id", json!("9999"), "failed"),
             ("content", json!(""), "failed"),
         ] {
@@ -338,11 +341,22 @@ mod tests {
             archive.text_only = true;
             let mut fixture: Value = serde_json::from_str(DEMO).unwrap();
             fixture["responses"]["/ajax/novel/1004"][field] = value;
+            if field == "isLoginOnly" {
+                fixture["responses"]["/ajax/novel/1004"]["content"] = Value::Null;
+            }
             let client = Fixture::new(&fixture.to_string(), Arc::default()).unwrap();
             let target = Target::new("novel", "1004").unwrap();
             assert_eq!(archive.prepare(&target, &client).unwrap(), expected);
             assert_eq!(client.requests(), 1);
             assert!(!archive.text_path(&target).unwrap().exists());
+            if field == "isLoginOnly" {
+                assert!(archive
+                    .reason(&target)
+                    .unwrap()
+                    .unwrap()
+                    .contains("Login-only"));
+                assert_eq!(archive.status(&target).unwrap().as_deref(), Some("skipped"));
+            }
         }
     }
 }

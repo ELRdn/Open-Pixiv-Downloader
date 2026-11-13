@@ -86,6 +86,7 @@ fn eligible(body: &Value) -> bool {
     public_general(body)
         && (body["restrict"].is_null() || body["restrict"] == 0 || body["restrict"] == "0")
         && (body["isUnlisted"].is_null() || body["isUnlisted"] == false)
+        && (body["isLoginOnly"].is_null() || body["isLoginOnly"] == false)
 }
 fn snapshot_identity(body: &Value) -> String {
     let keys = [
@@ -2411,6 +2412,9 @@ mod tests {
         assert!(!eligible(&json!({"id":"1"})));
         assert!(!eligible(&json!({"xRestrict":2})));
         assert!(eligible(&json!({"xRestrict":0})));
+        assert!(eligible(&json!({"xRestrict":0,"isLoginOnly":false})));
+        assert!(!eligible(&json!({"xRestrict":0,"isLoginOnly":true})));
+        assert!(!eligible(&json!({"xRestrict":0,"isLoginOnly":"false"})));
     }
     #[test]
     fn crc_corruption_rejected() {
