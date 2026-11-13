@@ -4,7 +4,7 @@ use crate::{
     jobs::{self, Event, Options},
     settings::{self, Settings},
     target::Target,
-    transport::MAX_REQUEST_BUDGET,
+    transport::{MAX_JOBS, MAX_REQUEST_BUDGET, MIN_REQUEST_INTERVAL},
     update,
 };
 use crossterm::{
@@ -534,10 +534,10 @@ impl App {
         let Some((interval, api_interval)) = intervals.filter(|(global, api)| {
             global.is_finite()
                 && api.is_finite()
-                && (0.1..=3600.0).contains(global)
-                && (0.1..=3600.0).contains(api)
+                && (MIN_REQUEST_INTERVAL..=3600.0).contains(global)
+                && (MIN_REQUEST_INTERVAL..=3600.0).contains(api)
         }) else {
-            self.settings_error = Some("間隔は0.1〜3600秒で入力してください。".into());
+            self.settings_error = Some("間隔は0.001〜3600秒で入力してください。".into());
             return;
         };
         match self.settings_budget.value.parse::<usize>() {
@@ -596,7 +596,7 @@ impl App {
                 self.settings_jobs = self.settings_jobs.saturating_sub(1).max(1)
             }
             KeyCode::Right if self.settings_focus == 4 => {
-                self.settings_jobs = (self.settings_jobs + 1).min(8)
+                self.settings_jobs = (self.settings_jobs + 1).min(MAX_JOBS)
             }
             KeyCode::Char(c @ '1'..='8') if self.settings_focus == 4 => {
                 self.settings_jobs = c.to_digit(10).unwrap() as usize
@@ -1436,7 +1436,9 @@ impl App {
                     KeyCode::Left | KeyCode::Char('-') => {
                         self.jobs = self.jobs.saturating_sub(1).max(1)
                     }
-                    KeyCode::Right | KeyCode::Char('+') => self.jobs = (self.jobs + 1).min(8),
+                    KeyCode::Right | KeyCode::Char('+') => {
+                        self.jobs = (self.jobs + 1).min(MAX_JOBS)
+                    }
                     KeyCode::Char(c) if ('1'..='8').contains(&c) => {
                         self.jobs = c.to_digit(10).unwrap() as usize
                     }
@@ -1880,7 +1882,10 @@ fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
     for (i, (rect, text)) in text_settings_controls(popup)
         .into_iter()
         .zip([
-            format!("並列: {}作品  ← / → で変更（1〜8）", app.settings_jobs),
+            format!(
+                "並列: {}作品  ← / → で変更（1〜{MAX_JOBS}）",
+                app.settings_jobs
+            ),
             format!(
                 "保存: {}  ← / → で切替",
                 if app.settings_text_only {
@@ -2452,6 +2457,12 @@ mod tests {
         assert_eq!(app.settings_budget.value, "1000000");
         app.settings_focus = 4;
         app.settings_key(KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE));
+        for _ in 0..MAX_JOBS {
+            app.settings_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        assert_eq!(app.settings_jobs, MAX_JOBS);
+        app.settings_interval = Editor::new("0.001");
+        app.settings_api_interval = Editor::new("0.01");
         app.settings_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.settings_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert!(!app.text_only);
@@ -2459,12 +2470,14 @@ mod tests {
         assert!(app.modal == Modal::None);
         let mut restarted = App::default();
         restarted.load_preferences(path.clone());
-        assert_eq!(restarted.jobs, 8);
+        assert_eq!(restarted.jobs, MAX_JOBS);
+        assert_eq!(restarted.interval, MIN_REQUEST_INTERVAL);
+        assert_eq!(restarted.api_interval, 0.01);
         assert!(restarted.text_only);
         assert_eq!(restarted.request_budget, MAX_REQUEST_BUDGET);
         assert_eq!(PathBuf::from(&restarted.out.value), out);
         let options = restarted.options_for(true).unwrap();
-        assert_eq!(options.jobs, 8);
+        assert_eq!(options.jobs, MAX_JOBS);
         assert!(options.text_only);
         assert_eq!(options.request_budget, MAX_REQUEST_BUDGET);
         let saved = std::fs::read_to_string(path).unwrap();
@@ -2555,7 +2568,7 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        for c in "0.5".chars() {
+        for c in "0.001".chars() {
             app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -2566,11 +2579,11 @@ mod tests {
         assert!(app.modal == Modal::Settings);
         assert_eq!(app.request_budget, 20_000);
         assert_eq!(app.interval, 1.0);
-        app.settings_api_interval = Editor::new("0.5");
+        app.settings_api_interval = Editor::new("0.01");
         app.apply_settings();
         let options = app.options_for(true).unwrap();
-        assert_eq!(options.interval, 0.5);
-        assert_eq!(options.api_interval, 0.5);
+        assert_eq!(options.interval, MIN_REQUEST_INTERVAL);
+        assert_eq!(options.api_interval, 0.01);
         assert_eq!(options.request_budget, 10);
     }
     #[test]
@@ -2910,10 +2923,10 @@ mod tests {
         assert_eq!(o.targets.len(), 16);
         assert_eq!(o.jobs, 2);
         app.focus = 2;
-        for _ in 0..10 {
+        for _ in 0..MAX_JOBS * 2 {
             app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         }
-        assert_eq!(app.jobs, 8);
+        assert_eq!(app.jobs, MAX_JOBS);
     }
     #[test]
     fn demo_switch_keeps_online_urls_and_destination() {

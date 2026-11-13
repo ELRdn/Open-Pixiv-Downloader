@@ -16,6 +16,8 @@ use url::Url;
 
 pub const DEMO: &str = include_str!("../examples/synthetic-fixture.json");
 pub const MAX_REQUEST_BUDGET: usize = 1_000_000;
+pub const MAX_JOBS: usize = 32;
+pub const MIN_REQUEST_INTERVAL: f64 = 0.001;
 pub trait Transport: Send + Sync {
     fn api(&self, path: &str, query: &[(&str, String)]) -> Result<Value>;
     fn download(&self, url: &str, path: &Path) -> Result<()>;
@@ -273,11 +275,11 @@ impl Online {
         balanced: bool,
         api_interval: f64,
     ) -> Result<Self> {
-        let minimum = if balanced { 0.1 } else { 2.0 };
+        let minimum = if balanced { MIN_REQUEST_INTERVAL } else { 2.0 };
         if !interval.is_finite()
             || !(minimum..=3600.0).contains(&interval)
             || !api_interval.is_finite()
-            || !(0.1..=3600.0).contains(&api_interval)
+            || !(MIN_REQUEST_INTERVAL..=3600.0).contains(&api_interval)
             || !(1..=MAX_REQUEST_BUDGET).contains(&budget)
             || max_bytes == 0
         {
@@ -1148,7 +1150,15 @@ mod tests {
         assert!(custom.eligible(&gate, 0, start + Duration::from_millis(500)));
         assert!(!custom.eligible(&gate, 1, start + Duration::from_millis(99)));
         assert!(custom.eligible(&gate, 1, start + Duration::from_millis(100)));
-        for value in [0.0, -1.0, 0.09, 3601.0, f64::NAN, f64::INFINITY] {
+        let fast = Online::with_profile(0.001, 100, 1024, Arc::default(), true, 0.001).unwrap();
+        assert!(!fast.eligible(&gate, 0, start + Duration::from_micros(999)));
+        assert!(fast.eligible(&gate, 0, start + Duration::from_millis(1)));
+        let busy = Admission {
+            active: [4, 0],
+            ..Default::default()
+        };
+        assert!(!fast.eligible(&busy, 0, start + Duration::from_secs(1)));
+        for value in [0.0, -1.0, 0.0009, 3601.0, f64::NAN, f64::INFINITY] {
             assert!(Online::with_profile(value, 100, 1024, Arc::default(), true, 2.0).is_err());
             assert!(Online::with_profile(1.0, 100, 1024, Arc::default(), true, value).is_err());
         }
