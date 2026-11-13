@@ -4,7 +4,7 @@ use crate::{
     error::{invalid, Error, Result, StopReason},
     media::SharedMedia,
     target::{Target, MAX_WORKS},
-    transport::{Fixture, Online, Transport, DEMO, MAX_REQUEST_BUDGET},
+    transport::{Fixture, Online, Transport, DEMO, MAX_JOBS, MAX_REQUEST_BUDGET},
 };
 use serde_json::{json, Value};
 use std::{
@@ -255,14 +255,14 @@ pub fn run(
     emit: impl Fn(Event) + Sync,
 ) -> Result<Value> {
     let started = Instant::now();
-    if !(1..=8).contains(&options.jobs)
+    if !(1..=MAX_JOBS).contains(&options.jobs)
         || !(1..=1000).contains(&options.limit)
         || !(1..=1024).contains(&options.max_file_mib)
         || !(1..=MAX_REQUEST_BUDGET).contains(&options.request_budget)
         || !["all", "art", "novel"].contains(&options.types.as_str())
     {
         return Err(invalid(
-            "Use jobs 1–8, limit 1–1000, request budget 1–1000000, file size 1–1024 MiB",
+            "Use jobs 1–32, limit 1–1000, request budget 1–1000000, file size 1–1024 MiB",
         ));
     }
     if usize::from(options.online)
@@ -1736,6 +1736,20 @@ mod tests {
                 .count(),
             2
         );
+        let maximum = Options {
+            jobs: MAX_JOBS,
+            out: temp.path().join("maximum"),
+            ..o.clone()
+        };
+        let maximum_report = run(maximum.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(maximum_report["counts"]["complete"], 4);
+        let invalid = Options {
+            jobs: MAX_JOBS + 1,
+            out: temp.path().join("invalid"),
+            ..maximum
+        };
+        assert!(run(invalid.clone(), false, Arc::default(), |_| {}).is_err());
+        assert!(!invalid.out.exists());
         let stop = Arc::new(AtomicBool::new(true));
         let r = run(o, false, stop, |_| {}).unwrap();
         assert_eq!(r["status"], "paused");

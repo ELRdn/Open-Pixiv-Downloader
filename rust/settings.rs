@@ -1,7 +1,7 @@
 use crate::{
     archive::atomic,
     error::{invalid, Result},
-    transport::MAX_REQUEST_BUDGET,
+    transport::{MAX_JOBS, MAX_REQUEST_BUDGET, MIN_REQUEST_INTERVAL},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,14 +40,14 @@ impl Settings {
         if self.schema_version != 1
             || self.out.trim().is_empty()
             || self.out.contains('\0')
-            || !(1..=8).contains(&self.jobs)
+            || !(1..=MAX_JOBS).contains(&self.jobs)
             || !(1..=MAX_REQUEST_BUDGET).contains(&self.request_budget)
             || ![self.interval, self.api_interval]
                 .iter()
-                .all(|n| n.is_finite() && (0.1..=3600.0).contains(n))
+                .all(|n| n.is_finite() && (MIN_REQUEST_INTERVAL..=3600.0).contains(n))
         {
             return Err(invalid(
-                "設定が不正です（並列1〜8、要求予算1〜1000000、間隔0.1〜3600秒）。",
+                "設定が不正です（並列1〜32、要求予算1〜1000000、間隔0.001〜3600秒）。",
             ));
         }
         Ok(())
@@ -84,14 +84,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("opixiv/settings.json");
         let mut settings = Settings {
-            jobs: 8,
+            jobs: MAX_JOBS,
+            interval: MIN_REQUEST_INTERVAL,
+            api_interval: 0.01,
             text_only: true,
             request_budget: MAX_REQUEST_BUDGET,
             ..Default::default()
         };
         settings.save(&path).unwrap();
         let loaded = Settings::load(&path).unwrap();
-        assert_eq!(loaded.jobs, 8);
+        assert_eq!(loaded.jobs, MAX_JOBS);
+        assert_eq!(loaded.interval, MIN_REQUEST_INTERVAL);
+        assert_eq!(loaded.api_interval, 0.01);
         assert!(loaded.text_only);
         assert_eq!(loaded.request_budget, MAX_REQUEST_BUDGET);
         settings.request_budget += 1;
@@ -100,6 +104,12 @@ mod tests {
             Settings::load(&path).unwrap().request_budget,
             MAX_REQUEST_BUDGET
         );
+        settings.request_budget = MAX_REQUEST_BUDGET;
+        settings.jobs = MAX_JOBS + 1;
+        assert!(settings.save(&path).is_err());
+        settings.jobs = MAX_JOBS;
+        settings.interval = MIN_REQUEST_INTERVAL / 10.0;
+        assert!(settings.save(&path).is_err());
         fs::write(&path, b"{broken").unwrap();
         assert!(Settings::load(&path).is_err());
     }

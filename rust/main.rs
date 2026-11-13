@@ -69,7 +69,7 @@ struct FetchArgs {
     input: Option<PathBuf>,
     #[arg(long, default_value = "archive")]
     out: PathBuf,
-    #[arg(long,default_value_t=2,value_parser=clap::value_parser!(u8).range(1..=8))]
+    #[arg(long,default_value_t=2,value_parser=clap::value_parser!(u8).range(1..=transport::MAX_JOBS as i64))]
     jobs: u8,
     #[arg(long, conflicts_with = "limit")]
     all: bool,
@@ -87,7 +87,7 @@ struct FetchArgs {
     /// Global request start interval; defaults to 2 seconds, or 1 with --balanced
     #[arg(long)]
     interval: Option<f64>,
-    /// Separate API/media timing; --interval and --api-interval accept 0.1–3600 seconds
+    /// Separate API/media timing; --interval and --api-interval accept 0.001–3600 seconds
     #[arg(long)]
     balanced: bool,
     /// API start interval; the global --interval also applies (default: 2 seconds)
@@ -243,17 +243,17 @@ mod cli_tests {
             "--online",
             "--balanced",
             "--interval",
-            "0.5",
+            "0.001",
             "--api-interval",
-            "0.5",
+            "0.01",
             "--jobs",
-            "8",
+            "32",
         ]);
-        assert_eq!(fast.interval, 0.5);
-        assert_eq!(fast.api_interval, 0.5);
-        assert_eq!(fast.jobs, 8);
+        assert_eq!(fast.interval, 0.001);
+        assert_eq!(fast.api_interval, 0.01);
+        assert_eq!(fast.jobs, transport::MAX_JOBS);
         assert!(
-            Cli::try_parse_from(["opixiv", "fetch", "art:1", "--online", "--jobs", "9"]).is_err()
+            Cli::try_parse_from(["opixiv", "fetch", "art:1", "--online", "--jobs", "33"]).is_err()
         );
     }
     #[test]
