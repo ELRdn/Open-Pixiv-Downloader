@@ -163,12 +163,12 @@ impl Archive {
             }
             str_at(&body, "content")?.to_owned()
         };
-        let text = novel::body_text(&content);
+        let text = novel::body_text(&content).replace('\0', "");
         let bytes = text.len() as u64;
         if bytes < self.min_text_bytes {
             return self.skip_short_text(target, bytes);
         }
-        if text.trim().is_empty() || text.contains('\0') {
+        if text.trim().is_empty() {
             return Err(invalid("Novel has no usable text body"));
         }
         let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
@@ -335,6 +335,7 @@ mod tests {
             ("isLoginOnly", json!(true), "skipped"),
             ("id", json!("9999"), "failed"),
             ("content", json!(""), "failed"),
+            ("content", json!("\0"), "failed"),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let mut archive = Archive::open(temp.path(), false).unwrap();

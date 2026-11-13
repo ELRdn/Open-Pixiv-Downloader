@@ -71,6 +71,8 @@ opixiv fetch "https://www.pixiv.net/tags/タグ名/novels" --online --all --text
 opixiv fetch --resume --online --text-only --request-budget 1000000 --out archive
 ```
 
+alpha.14以降は、取得本文に混入したNUL文字（U+0000）を取り除いてTXTを生成します。最小サイズは、NUL除去後のUTF-8バイト数で判定します。
+
 ## 1KB未満の本文を除外する（alpha.12以降）
 
 保存先ルートに `novel-policy.json` を置くと、本文専用モードの最小サイズを記憶します。TUI・CLIの両方で、同じ保存先に適用します。
