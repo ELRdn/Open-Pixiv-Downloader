@@ -485,6 +485,11 @@ pub fn discover_with(
                 !complete && kind == "novel" && start == end && expected <= searched_slots as u64
             }) {
                 let known = range_seen.union(&seen).cloned().collect();
+                progress(format!(
+                    "密集日 {day}: 不足 {}件を周辺IDから補完中",
+                    expected as usize - found.len()
+                ));
+                let mut checked = 0_usize;
                 let recovered = recover_gaps(
                     &word,
                     &query,
@@ -492,7 +497,14 @@ pub fn discover_with(
                     &gaps,
                     &known,
                     expected as usize - found.len(),
-                    &mut fetch,
+                    &mut |path, query, node| {
+                        let body = fetch(path, query, node)?;
+                        checked += 1;
+                        if checked.is_multiple_of(100) {
+                            progress(format!("密集日 {day}: ID補完で{checked}件を確認"));
+                        }
+                        Ok(body)
+                    },
                 )?;
                 let recovered_any = !recovered.is_empty();
                 for (target, time) in recovered {
