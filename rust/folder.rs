@@ -1,15 +1,19 @@
 //! Open local output directories without passing user paths through a shell.
-use crate::error::{invalid, Result};
+use crate::{
+    error::{invalid, Result},
+    i18n::Language,
+};
 use std::{
     path::Path,
     process::{Command, Stdio},
 };
 
-fn command(path: &Path) -> Result<Command> {
+fn command(path: &Path, language: Language) -> Result<Command> {
     if !path.is_dir() {
-        return Err(invalid(
+        return Err(invalid(language.text(
+            "The output folder does not exist yet. Check the output path.",
             "保存フォルダーがまだありません。保存先を確認してください。",
-        ));
+        )));
     }
     let path = path.canonicalize()?;
     #[cfg(target_os = "windows")]
@@ -58,9 +62,12 @@ fn command(path: &Path) -> Result<Command> {
     Ok(command)
 }
 
-pub fn open(path: &Path) -> Result<()> {
-    let mut child = command(path)?.spawn().map_err(|_| {
-        invalid("フォルダーを開けませんでした。ファイルマネージャーの設定を確認してください。")
+pub fn open(path: &Path, language: Language) -> Result<()> {
+    let mut child = command(path, language)?.spawn().map_err(|_| {
+        invalid(language.text(
+            "Cannot open the folder. Check your file manager settings.",
+            "フォルダーを開けませんでした。ファイルマネージャーの設定を確認してください。",
+        ))
     })?;
     // Explorer can return nonzero after forwarding to an existing window. Do not
     // block the TUI waiting on the window; reap helpers without taking over stdin.
@@ -78,7 +85,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("保存先 空白 & $(literal)");
         std::fs::create_dir(&path).unwrap();
-        let cmd = command(&path).unwrap();
+        let cmd = command(&path, Language::English).unwrap();
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args.len(), 1);
         assert!(args[0]
@@ -94,9 +101,9 @@ mod tests {
     fn never_creates_a_missing_output_or_opens_a_file() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("missing");
-        assert!(command(&path).is_err());
+        assert!(command(&path, Language::English).is_err());
         assert!(!path.exists());
         std::fs::write(&path, b"not a directory").unwrap();
-        assert!(command(&path).is_err());
+        assert!(command(&path, Language::English).is_err());
     }
 }

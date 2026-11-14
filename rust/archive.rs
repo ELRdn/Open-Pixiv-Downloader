@@ -306,7 +306,7 @@ impl Archive {
         types: &str,
         online: bool,
         generation: &str,
-        progress: impl FnMut(String),
+        progress: impl FnMut(crate::i18n::Message),
     ) -> Result<Vec<Target>> {
         let scope = serde_json::to_string(&(generation, online, types, target.label()))?;
         if target.kind == "search" {
@@ -1065,7 +1065,8 @@ impl Archive {
             if self.text_matches(&target)? {
                 valid += 1;
             } else {
-                problems.push(json!({"key":target.key(),"errors":["本文TXTが見つからないか変更されています"]}));
+                problems
+                    .push(json!({"key":target.key(),"errors":["Body TXT is missing or modified"]}));
             }
         }
         Ok(json!({"checked":checked,"valid":valid,"problems":problems}))

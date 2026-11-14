@@ -1,6 +1,7 @@
 use crate::{
     archive::atomic,
     error::{invalid, Result},
+    i18n::Language,
     transport::{MAX_JOBS, MAX_REQUEST_BUDGET, MIN_REQUEST_INTERVAL},
 };
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,7 @@ pub struct Settings {
     pub interval: f64,
     pub api_interval: f64,
     pub text_only: bool,
+    pub language: Language,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -32,6 +34,7 @@ impl Default for Settings {
             interval: 1.0,
             api_interval: 2.0,
             text_only: false,
+            language: Language::English,
         }
     }
 }
@@ -47,7 +50,7 @@ impl Settings {
                 .all(|n| n.is_finite() && (MIN_REQUEST_INTERVAL..=3600.0).contains(n))
         {
             return Err(invalid(
-                "設定が不正です（並列1〜32、要求予算0〜1000000・0は無制限、間隔0.001〜3600秒）。",
+                "Invalid settings (workers 1..32, request budget 0..1000000 where 0 is unlimited, intervals 0.001..3600 seconds).",
             ));
         }
         Ok(())
@@ -73,7 +76,7 @@ pub fn path() -> Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
     base.map(|base| base.join("opixiv/settings.json"))
-        .ok_or_else(|| invalid("設定フォルダーが見つかりません。"))
+        .ok_or_else(|| invalid("Cannot find the settings folder."))
 }
 
 #[cfg(test)]
@@ -89,6 +92,7 @@ mod tests {
             api_interval: 0.01,
             text_only: true,
             request_budget: MAX_REQUEST_BUDGET,
+            language: Language::Japanese,
             ..Default::default()
         };
         settings.save(&path).unwrap();
@@ -98,6 +102,7 @@ mod tests {
         assert_eq!(loaded.api_interval, 0.01);
         assert!(loaded.text_only);
         assert_eq!(loaded.request_budget, MAX_REQUEST_BUDGET);
+        assert_eq!(loaded.language, Language::Japanese);
         settings.request_budget += 1;
         assert!(settings.save(&path).is_err());
         assert_eq!(
@@ -114,5 +119,22 @@ mod tests {
         assert!(settings.save(&path).is_err());
         fs::write(&path, b"{broken").unwrap();
         assert!(Settings::load(&path).is_err());
+    }
+    #[test]
+    fn old_settings_default_to_english_and_unknown_languages_are_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let old = br#"{"out":"archive/works","jobs":8,"text_only":true,"request_budget":0}"#;
+        fs::write(&path, old).unwrap();
+        let loaded = Settings::load(&path).unwrap();
+        assert_eq!(loaded.language, Language::English);
+        assert_eq!(loaded.out, "archive/works");
+        assert_eq!(loaded.jobs, 8);
+        assert!(loaded.text_only);
+        assert_eq!(loaded.request_budget, 0);
+        let unknown = br#"{"language":"unknown"}"#;
+        fs::write(&path, unknown).unwrap();
+        assert!(Settings::load(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), unknown);
     }
 }

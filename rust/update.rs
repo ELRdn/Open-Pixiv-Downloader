@@ -1,5 +1,8 @@
 //! Fixed-source update checks and staged self replacement.
-use crate::error::{invalid, Result as AppResult};
+use crate::{
+    error::{invalid, Result as AppResult},
+    i18n::Language,
+};
 use reqwest::blocking::Client;
 use semver::Version;
 use serde::Deserialize;
@@ -38,13 +41,25 @@ impl Status {
             Self::Current(latest)
         }
     }
-    pub fn message(&self) -> String {
+    pub fn message(&self, language: Language) -> String {
         match self {
-            Self::Unchecked => "更新は未確認です".into(),
-            Self::Checking => "最新版を確認しています…".into(),
-            Self::Current(_) => "新しいアップデートはありません".into(),
-            Self::Available(v) => format!("アップデートが利用できます！ v{v}"),
-            Self::Failed(_) => "更新を確認できませんでした".into(),
+            Self::Unchecked => language
+                .text("Updates not checked", "更新は未確認です")
+                .into(),
+            Self::Checking => language
+                .text("Checking for updates…", "最新版を確認しています…")
+                .into(),
+            Self::Current(_) => language
+                .text("No new updates available", "新しいアップデートはありません")
+                .into(),
+            Self::Available(v) => tr_format!(
+                language,
+                "Update available! v{v}",
+                "アップデートが利用できます！ v{v}"
+            ),
+            Self::Failed(_) => language
+                .text("Could not check for updates", "更新を確認できませんでした")
+                .into(),
         }
     }
 }
@@ -60,26 +75,24 @@ struct Package {
 }
 fn parse_manifest(bytes: &[u8]) -> Result<Version, String> {
     if bytes.len() > MAX_MANIFEST {
-        return Err("更新情報のサイズが上限を超えました。".into());
+        return Err("Update metadata exceeds the size limit.".into());
     }
-    let text = std::str::from_utf8(bytes).map_err(|_| "更新情報の文字コードを確認できません。")?;
-    let manifest: Manifest =
-        toml::from_str(text).map_err(|_| "更新情報の形式を確認できません。")?;
+    let text = std::str::from_utf8(bytes).map_err(|_| "Invalid update metadata encoding.")?;
+    let manifest: Manifest = toml::from_str(text).map_err(|_| "Invalid update metadata format.")?;
     if manifest.package.name != "open-pixiv-downloader" {
-        return Err("更新情報の製品名が一致しません。".into());
+        return Err("Update metadata package name does not match.".into());
     }
-    Version::parse(&manifest.package.version)
-        .map_err(|_| "更新情報のバージョンを確認できません。".into())
+    Version::parse(&manifest.package.version).map_err(|_| "Invalid update metadata version.".into())
 }
 
 fn fetch(client: &Client, url: &str) -> Result<Version, String> {
     let response = client
         .get(url)
         .send()
-        .map_err(|_| "GitHubに接続できません。時間をおいて再確認してください。")?;
+        .map_err(|_| "Cannot connect to GitHub. Try again later.")?;
     if !response.status().is_success() {
         return Err(format!(
-            "GitHubの更新情報を取得できません（HTTP {}）。",
+            "Cannot fetch update metadata from GitHub (HTTP {}).",
             response.status().as_u16()
         ));
     }
@@ -87,13 +100,13 @@ fn fetch(client: &Client, url: &str) -> Result<Version, String> {
         .content_length()
         .is_some_and(|n| n > MAX_MANIFEST as u64)
     {
-        return Err("更新情報のサイズが上限を超えました。".into());
+        return Err("Update metadata exceeds the size limit.".into());
     }
     let mut bytes = Vec::new();
     response
         .take(MAX_MANIFEST as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "更新情報の受信が完了しませんでした。")?;
+        .map_err(|_| "Could not finish receiving update metadata.")?;
     parse_manifest(&bytes)
 }
 pub fn check() -> Result<Version, String> {
@@ -107,7 +120,7 @@ pub fn check() -> Result<Version, String> {
             " (update check)"
         ))
         .build()
-        .map_err(|_| "更新確認を初期化できません。")?;
+        .map_err(|_| "Cannot initialize the update check.")?;
     fetch(&client, MANIFEST_URL)
 }
 pub fn background() -> mpsc::Receiver<Result<Version, String>> {
@@ -117,8 +130,8 @@ pub fn background() -> mpsc::Receiver<Result<Version, String>> {
     });
     receiver
 }
-pub fn print_instructions() {
-    println!("\nOpen Pixiv Downloaderの更新：PowerShellで次を実行してください。\n\n{UPDATE_COMMAND}\n\n更新確認のみ: opixiv update --check\n更新後は opixiv で起動できます。");
+pub fn print_instructions(language: Language) {
+    println!("{}", tr_format!(language, "\nTo update Open Pixiv Downloader, run this in your terminal:\n\n{UPDATE_COMMAND}\n\nCheck only: opixiv update --check\nAfter updating, launch with opixiv.", "\nOpen Pixiv Downloaderの更新：PowerShellで次を実行してください。\n\n{UPDATE_COMMAND}\n\n更新確認のみ: opixiv update --check\n更新後は opixiv で起動できます。"));
 }
 
 fn cargo_command(root: &Path) -> Command {
@@ -139,18 +152,18 @@ fn candidate_path(root: &Path) -> PathBuf {
 }
 fn binary_version(output: &[u8]) -> AppResult<Version> {
     let text = std::str::from_utf8(output)
-        .map_err(|_| invalid("更新版のバージョン情報を読み取れません。"))?;
+        .map_err(|_| invalid("Cannot read the candidate version output."))?;
     let mut parts = text.split_whitespace();
     if parts.next() != Some("opixiv") {
-        return Err(invalid("更新版の製品名が一致しません。"));
+        return Err(invalid("Candidate package name does not match."));
     }
     let version = parts
         .next()
-        .ok_or_else(|| invalid("更新版のバージョン情報がありません。"))?;
+        .ok_or_else(|| invalid("Candidate version output is missing."))?;
     if parts.next().is_some() {
-        return Err(invalid("更新版のバージョン情報の形式が不正です。"));
+        return Err(invalid("Invalid candidate version output format."));
     }
-    Version::parse(version).map_err(|_| invalid("更新版のバージョン情報の形式が不正です。"))
+    Version::parse(version).map_err(|_| invalid("Invalid candidate version output format."))
 }
 fn validate_candidate(
     candidate: &Path,
@@ -158,15 +171,13 @@ fn validate_candidate(
     expected: Option<&Version>,
 ) -> AppResult<Version> {
     let metadata = std::fs::symlink_metadata(candidate)
-        .map_err(|_| invalid("Cargoは終了しましたが、更新版の実行ファイルが見つかりません。"))?;
+        .map_err(|_| invalid("Cargo finished but the candidate executable is missing."))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(invalid(
-            "更新版の実行ファイルが通常のファイルではありません。",
-        ));
+        return Err(invalid("The candidate executable is not a regular file."));
     }
     let directory = candidate
         .parent()
-        .ok_or_else(|| invalid("更新版の保存先が不明です。"))?;
+        .ok_or_else(|| invalid("Cannot determine the candidate folder."))?;
     let capture = tempfile::NamedTempFile::new_in(directory)?;
     let mut child = Command::new(candidate)
         .arg("--version")
@@ -174,14 +185,14 @@ fn validate_candidate(
         .stdout(Stdio::from(capture.as_file().try_clone()?))
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| invalid("更新版を起動してバージョンを検証できません。"))?;
+        .map_err(|_| invalid("Cannot start the candidate to verify its version."))?;
     let started = std::time::Instant::now();
     let status = loop {
         if started.elapsed() >= Duration::from_secs(5) || capture.as_file().metadata()?.len() > 4096
         {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(invalid("更新版のバージョン検証が時間または出力の上限を超えました。現在の実行ファイルは変更していません。"));
+            return Err(invalid("Candidate verification exceeded its time or output limit. The current executable was preserved."));
         }
         if let Some(status) = child.try_wait()? {
             break status;
@@ -189,10 +200,10 @@ fn validate_candidate(
         thread::sleep(Duration::from_millis(20));
     };
     if !status.success() {
-        return Err(invalid("更新版のバージョン検証に失敗しました。"));
+        return Err(invalid("Candidate version verification failed."));
     }
     if capture.as_file().metadata()?.len() > 4096 {
-        return Err(invalid("更新版のバージョン出力が上限を超えました。"));
+        return Err(invalid("Candidate version output exceeds the size limit."));
     }
     let output = std::fs::read(capture.path())?;
     let version = binary_version(&output)?;
@@ -200,17 +211,24 @@ fn validate_candidate(
         || expected.is_some_and(|v| version.cmp_precedence(v).is_lt())
     {
         return Err(invalid(
-            "取得した更新版が現在または確認済みのバージョンより古いため、置き換えを中止しました。",
+            "The candidate is older than the current or expected version; replacement cancelled.",
         ));
     }
     Ok(version)
 }
 fn require_tool(program: &str) -> AppResult<()> {
-    let output=Command::new(program).arg("--version").stdin(Stdio::null()).output()
-        .map_err(|_|invalid(&format!("{program} を起動できません。Rust/CargoとGitをインストールし、PowerShellを開き直してください。")))?;
+    let output = Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|_| {
+            invalid(&format!(
+                "Cannot start {program}. Install Rust/Cargo and Git, then reopen your terminal."
+            ))
+        })?;
     if !output.status.success() {
         return Err(invalid(&format!(
-            "{program} の起動確認に失敗しました。Rust/CargoとGitを確認してください。"
+            "Failed to check {program}. Verify your Rust/Cargo and Git installation."
         )));
     }
     Ok(())
@@ -236,16 +254,16 @@ fn restore_if_missing(original: &Path, backup: &Path) -> std::io::Result<()> {
 /// No shell is used, and manifest fields never become command arguments.
 pub fn install(check_only: bool, force: bool) -> AppResult<i32> {
     let current = Version::parse(env!("CARGO_PKG_VERSION")).expect("Cargo version is valid SemVer");
-    println!("Open Pixiv Downloader 更新\n現在: v{current}");
+    println!("Open Pixiv Downloader update\nCurrent: v{current}");
     let expected = if force {
         None
     } else {
-        let latest=check().map_err(|message|invalid(&format!("{message}\n再実行: opixiv update\nバージョン確認を省略して再インストール: opixiv update --force")))?;
+        let latest=check().map_err(|message|invalid(&format!("{message}\nRetry: opixiv update\nReinstall without the version check: opixiv update --force")))?;
         if !latest.cmp_precedence(&current).is_gt() {
-            println!("新しいアップデートはありません（GitHub: v{latest}）。");
+            println!("No new updates available (GitHub: v{latest}).");
             return Ok(0);
         }
-        println!("アップデートが利用できます: v{latest}");
+        println!("Update available: v{latest}");
         Some(latest)
     };
     if check_only {
@@ -256,7 +274,7 @@ pub fn install(check_only: bool, force: bool) -> AppResult<i32> {
     let current_exe = std::env::current_exe()?.canonicalize()?;
     let directory = current_exe
         .parent()
-        .ok_or_else(|| invalid("実行ファイルの保存先が不明です。"))?;
+        .ok_or_else(|| invalid("Cannot determine the executable folder."))?;
     let guard = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -264,23 +282,25 @@ pub fn install(check_only: bool, force: bool) -> AppResult<i32> {
         .truncate(false)
         .open(directory.join(".opixiv-update.lock"))
         .map_err(|_| {
-            invalid("更新先に書き込めません。実行ファイルの保存先の権限を確認してください。")
+            invalid(
+                "Cannot write to the update destination. Check the executable folder permissions.",
+            )
         })?;
     guard.try_lock().map_err(|_| {
-        invalid("別の更新処理が動いているか、この保存先では更新ロックを使用できません。")
+        invalid("Another update is running or this destination does not support update locks.")
     })?;
     let stage = tempfile::Builder::new()
         .prefix("opixiv-update-")
         .tempdir()?;
-    println!("更新版をビルドしています。数分かかる場合があります…");
+    println!("Building the update. This may take a few minutes…");
     let status = cargo_command(stage.path())
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|_| invalid("Cargoを起動できません。現在の実行ファイルは変更していません。"))?;
+        .map_err(|_| invalid("Cannot start Cargo. The current executable was preserved."))?;
     if !status.success() {
-        return Err(invalid("更新版のビルドに失敗しました。現在の実行ファイルは変更していません。Cargoのエラーを確認し、opixiv update で再実行してください。"));
+        return Err(invalid("Update build failed. The current executable was preserved. Check the Cargo error and retry with opixiv update."));
     }
     let candidate = candidate_path(stage.path());
     let installed = validate_candidate(&candidate, &current, expected.as_ref())?;
@@ -296,11 +316,11 @@ pub fn install(check_only: bool, force: bool) -> AppResult<i32> {
         // file. Restore a missing public path if a later copy/rename failed.
         if let Err(restore) = restore_if_missing(&current_exe, &backup) {
             let retained = stage.keep();
-            return Err(invalid(&format!("実行ファイルの置換と復元に失敗しました: {error}; {restore}\nバックアップを保持しています: {}",retained.display())));
+            return Err(invalid(&format!("Executable replacement and recovery both failed: {error}; {restore}\nBackup retained at: {}",retained.display())));
         }
-        return Err(invalid(&format!("実行ファイルを置き換えられませんでした: {error}\n元の実行ファイルを保持または復元しました。他のopixivを終了し、保存先の書き込み権限を確認してください。")));
+        return Err(invalid(&format!("Cannot replace the executable: {error}\nThe original was preserved or restored. Close other opixiv instances and check destination permissions.")));
     }
-    println!("更新しました: v{installed}\n次回は opixiv で起動してください。");
+    println!("Updated to v{installed}\nLaunch with opixiv next time.");
     Ok(0)
 }
 

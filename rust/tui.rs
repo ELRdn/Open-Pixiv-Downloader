@@ -1,6 +1,7 @@
 use crate::{
     archive::{safe_path, Archive},
     error::{invalid, Result},
+    i18n::Language,
     jobs::{self, Event, Options},
     settings::{self, Settings},
     target::Target,
@@ -41,7 +42,6 @@ const MUTED: Color = Color::Rgb(116, 143, 165);
 const CYAN: Color = Color::Rgb(81, 225, 232);
 const BLUE: Color = Color::Rgb(74, 117, 237);
 const BG: Color = Color::Rgb(11, 17, 26);
-const BALANCED_BUTTON: &str = "[ API・媒体を分離 ]";
 
 fn glyph(c: char) -> [&'static str; 6] {
     match c {
@@ -318,6 +318,8 @@ impl WorkRow {
     }
 }
 struct App {
+    language: Language,
+    settings_language: Language,
     urls: Editor,
     out: Editor,
     other_urls: Editor,
@@ -369,7 +371,10 @@ struct App {
 }
 impl Default for App {
     fn default() -> Self {
+        let language = Language::English;
         Self {
+            language,
+            settings_language: language,
             urls: Editor::default(),
             out: Editor::new("archive"),
             other_urls: Editor::new("user:9001"),
@@ -408,10 +413,7 @@ impl Default for App {
             metrics: Value::Null,
             run_out: None,
             selected: 0,
-            logs: VecDeque::from([
-                "Welcome to Open Pixiv Downloader!".into(),
-                "作品・作者・小説シリーズ・タグ検索のURLを貼り付けてください。".into(),
-            ]),
+            logs: welcome(language),
             done: 0,
             total: 0,
             status: "READY".into(),
@@ -427,7 +429,11 @@ impl Default for App {
 impl App {
     fn open_collection(&mut self, kind: &str) {
         if self.out.value.trim().is_empty() {
-            self.log("保存先を入力してください。".into());
+            self.log(
+                self.language
+                    .text("Enter an output folder.", "保存先を入力してください。")
+                    .into(),
+            );
             return;
         }
         let root = std::path::Path::new(self.out.value.trim());
@@ -436,23 +442,35 @@ impl App {
         } else {
             format!("works/{kind}")
         };
-        let result = safe_path(root, &relative).and_then(|p| crate::folder::open(&p).map(|()| p));
+        let result = safe_path(root, &relative)
+            .and_then(|p| crate::folder::open(&p, self.language).map(|()| p));
         match result {
-            Ok(path) => self.log(format!("フォルダーを開きました: {}", path.display())),
+            Ok(path) => self.log(tr_format!(
+                self.language,
+                "Opened folder: {}",
+                "フォルダーを開きました: {}",
+                path.display()
+            )),
             Err(e) => self.log(e.to_string()),
         }
     }
     fn collection_details(&self) -> String {
         if self.out.value.trim().is_empty() {
-            return "保存先を入力してください。Escで戻れます。".into();
+            return self
+                .language
+                .text(
+                    "Enter an output folder. Esc: back.",
+                    "保存先を入力してください。Escで戻れます。",
+                )
+                .into();
         }
         let root = std::env::current_dir()
             .unwrap_or_default()
             .join(self.out.value.trim());
         if self.text_only {
-            return format!("本文のみモード\n\n小説: {}\n\nN: 本文フォルダーを開く / Esc: 戻る\nTXTへ直接保存します。既存TXTも確認し、画像・集約コピーは作成しません。", root.join("novel").display());
+            return tr_format!(self.language, "Text-only mode\n\nNovels: {}\n\nN: Open text folder / Esc: Back\nSaves directly to TXT and checks existing files. No images or collection copies.", "本文のみモード\n\n小説: {}\n\nN: 本文フォルダーを開く / Esc: 戻る\nTXTへ直接保存します。既存TXTも確認し、画像・集約コピーは作成しません。", root.join("novel").display());
         }
-        format!("{}\nI: 画像を開く / N: 小説を開く / Esc: 戻る\n↑↓: スクロール\n\n画像: {}\n小説: {}\n\n新しく保存した作品は自動で集約します。\n画像は作品ID＋ページ番号、小説は作品ID.txtで保存します。\nコピーなので、集約先の編集は作品別の元ファイルに影響しません。",if self.worker.is_some(){"保存処理中です。終了後にEnterで既存分を集約できます。"}else{"Enter: 既存の保存済み作品を集約・補完（通信なし）"},root.join("works/image").display(),root.join("works/novel").display())
+        tr_format!(self.language, "{}\nI: Open images / N: Open novels / Esc: Back\nUp/Down: Scroll\n\nImages: {}\nNovels: {}\n\nNewly saved works are collected automatically.\nImages use work ID + page; novels use work ID.txt.\nThese are copies; editing them leaves the original per-work files intact.", "{}\nI: 画像を開く / N: 小説を開く / Esc: 戻る\n↑↓: スクロール\n\n画像: {}\n小説: {}\n\n新しく保存した作品は自動で集約します。\n画像は作品ID＋ページ番号、小説は作品ID.txtで保存します。\nコピーなので、集約先の編集は作品別の元ファイルに影響しません。",if self.worker.is_some(){self.language.text("Saving works. When finished, press Enter to collect existing files.", "保存処理中です。終了後にEnterで既存分を集約できます。")}else{self.language.text("Enter: Collect existing saved works (offline)", "Enter: 既存の保存済み作品を集約・補完（通信なし）")},root.join("works/image").display(),root.join("works/novel").display())
     }
     fn preferences(&self) -> Settings {
         let out = if self.demo {
@@ -471,6 +489,7 @@ impl App {
             },
             jobs: self.jobs,
             text_only: self.text_only,
+            language: self.language,
             request_budget: self.request_budget,
             balanced: self.balanced,
             interval: self.interval,
@@ -480,9 +499,10 @@ impl App {
     }
     fn save_preferences(&self, settings: &Settings, confirmed: bool) -> Result<()> {
         if self.settings_load_failed && !confirmed {
-            return Err(invalid(
+            return Err(invalid(self.language.text(
+                "Unreadable settings were preserved. Review them with F10 and press Enter to save.",
                 "読み込めなかった設定は保持しました。F10で設定を確認し、Enterで保存してください。",
-            ));
+            )));
         }
         if let Some(path) = &self.settings_path {
             settings.save(path)?;
@@ -493,6 +513,8 @@ impl App {
         if path.exists() {
             match Settings::load(&path) {
                 Ok(settings) => {
+                    self.language = settings.language;
+                    self.logs = welcome(settings.language);
                     self.out = Editor::new(&settings.out);
                     self.jobs = settings.jobs;
                     self.text_only = settings.text_only;
@@ -504,7 +526,7 @@ impl App {
                 }
                 Err(error) => {
                     self.settings_load_failed = true;
-                    self.log(format!("設定を読み込めません: {error}。初期値で起動します。F10で確認してください。"));
+                    self.log(tr_format!(self.language, "Cannot load settings: {error}. Using defaults. Review with F10.", "設定を読み込めません: {error}。初期値で起動します。F10で確認してください。"));
                 }
             }
         }
@@ -512,7 +534,14 @@ impl App {
     }
     fn open_settings(&mut self) {
         if self.worker.is_some() {
-            self.log("保存中の設定は変更できません。終了後にF10で変更できます。".into());
+            self.log(
+                self.language
+                    .text(
+                        "Settings are locked while saving. Press F10 when finished.",
+                        "保存中の設定は変更できません。終了後にF10で変更できます。",
+                    )
+                    .into(),
+            );
             return;
         }
         self.settings_budget = Editor::new(&self.request_budget.to_string());
@@ -521,6 +550,7 @@ impl App {
         self.settings_balanced = self.balanced;
         self.settings_jobs = self.jobs;
         self.settings_text_only = self.text_only;
+        self.settings_language = self.language;
         self.settings_focus = 0;
         self.settings_error = None;
         self.modal = Modal::Settings;
@@ -539,7 +569,14 @@ impl App {
                 && (MIN_REQUEST_INTERVAL..=3600.0).contains(global)
                 && (MIN_REQUEST_INTERVAL..=3600.0).contains(api)
         }) else {
-            self.settings_error = Some("間隔は0.001〜3600秒で入力してください。".into());
+            self.settings_error = Some(
+                self.language
+                    .text(
+                        "Enter intervals from 0.001 to 3600 seconds.",
+                        "間隔は0.001〜3600秒で入力してください。",
+                    )
+                    .into(),
+            );
             return;
         };
         match self.settings_budget.value.parse::<usize>() {
@@ -549,16 +586,22 @@ impl App {
                 settings.balanced = self.settings_balanced;
                 settings.jobs = self.settings_jobs;
                 settings.text_only = self.settings_text_only;
+                settings.language = self.settings_language;
                 settings.interval = interval;
                 settings.api_interval = api_interval;
                 if let Err(error) = settings
                     .validate()
                     .and_then(|()| self.save_preferences(&settings, true))
                 {
-                    self.settings_error = Some(format!("設定を保存できません: {error}"));
+                    self.settings_error = Some(tr_format!(
+                        self.language,
+                        "Cannot save settings: {error}",
+                        "設定を保存できません: {error}"
+                    ));
                     return;
                 }
                 self.jobs = settings.jobs;
+                self.language = settings.language;
                 self.settings_load_failed = false;
                 self.text_only = settings.text_only;
                 self.request_budget = value;
@@ -569,23 +612,36 @@ impl App {
                 self.interval = interval;
                 self.api_interval = api_interval;
                 self.modal = Modal::None;
-                self.log(format!(
+                self.log(tr_format!(
+                    self.language,
+                    "Settings: {} / Request budget {}",
                     "設定: {} / 要求予算 {}",
-                    profile_label(self.balanced, self.interval, self.api_interval),
+                    profile_label(
+                        self.language,
+                        self.balanced,
+                        self.interval,
+                        self.api_interval
+                    ),
                     budget_label(self.request_budget)
                 ));
             }
             _ => {
-                self.settings_error =
-                    Some("要求予算は0〜1000000の整数で入力してください（0＝∞）。".into())
+                self.settings_error = Some(
+                    self.language
+                        .text(
+                            "Enter a request budget from 0 to 1000000 (0 = unlimited).",
+                            "要求予算は0〜1000000の整数で入力してください（0＝∞）。",
+                        )
+                        .into(),
+                )
             }
         }
     }
     fn settings_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.modal = Modal::None,
-            KeyCode::Tab => self.settings_focus = (self.settings_focus + 1) % 6,
-            KeyCode::BackTab => self.settings_focus = (self.settings_focus + 5) % 6,
+            KeyCode::Tab => self.settings_focus = (self.settings_focus + 1) % 7,
+            KeyCode::BackTab => self.settings_focus = (self.settings_focus + 6) % 7,
             KeyCode::F(n @ 1..=3) => {
                 self.settings_budget = Editor::new(["500", "5000", "1000000"][(n - 1) as usize]);
                 self.settings_focus = 1;
@@ -606,6 +662,9 @@ impl App {
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if self.settings_focus == 5 => {
                 self.settings_text_only = !self.settings_text_only
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if self.settings_focus == 6 => {
+                self.settings_language = self.settings_language.toggle();
             }
             _ if (1..=3).contains(&self.settings_focus) => {
                 let decimal = self.settings_focus > 1;
@@ -648,7 +707,14 @@ impl App {
             .last_update_check
             .is_some_and(|t| t.elapsed() < update::RETRY_INTERVAL)
         {
-            self.log("更新の再確認は前回から1分後にできます。".into());
+            self.log(
+                self.language
+                    .text(
+                        "Wait one minute after the previous update check to try again.",
+                        "更新の再確認は前回から1分後にできます。",
+                    )
+                    .into(),
+            );
             return;
         }
         self.dirty = true;
@@ -665,9 +731,13 @@ impl App {
             .and_then(|rx| match rx.try_recv() {
                 Ok(v) => Some(v),
                 Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
-                    "更新確認の処理が終了しました。F8で再確認できます。".into(),
-                )),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(self
+                    .language
+                    .text(
+                        "Update check stopped. Press F8 to try again.",
+                        "更新確認の処理が終了しました。F8で再確認できます。",
+                    )
+                    .into())),
             });
         if let Some(result) = message {
             self.dirty = true;
@@ -676,7 +746,12 @@ impl App {
                 Ok(version) => {
                     let next = update::Status::from_version(version);
                     if matches!(next, update::Status::Available(_)) && self.update_status != next {
-                        self.log(format!("{} · F9で更新方法", next.message()));
+                        self.log(tr_format!(
+                            self.language,
+                            "{} · F9: Update instructions",
+                            "{} · F9で更新方法",
+                            next.message(self.language)
+                        ));
                     }
                     self.update_status = next;
                 }
@@ -700,16 +775,20 @@ impl App {
     fn update_details(&self) -> String {
         let latest = match &self.update_status {
             update::Status::Available(v) | update::Status::Current(v) => {
-                format!("GitHubのバージョン: v{v}")
+                tr_format!(
+                    self.language,
+                    "GitHub version: v{v}",
+                    "GitHubのバージョン: v{v}"
+                )
             }
-            _ => self.update_status.message(),
+            _ => self.update_status.message(self.language),
         };
         let error = if let update::Status::Failed(s) = &self.update_status {
             format!("\n{s}\n")
         } else {
             String::new()
         };
-        format!("{}\n\n現在: v{}\n{latest}\n{error}\n更新は、ツールを終了してPowerShellで opixiv update を実行します。\n保存済みの作品は引き続き利用できます。\nリポジトリへの移動やgit pullは不要です。\n\n{}\n\nEsc: この画面を閉じる",self.update_status.message(),env!("CARGO_PKG_VERSION"),if self.worker.is_some(){"保存処理が動いています。終了後にEnterで更新コマンドを表示できます。"}else{"Enter: ツールを終了し、コピー用の更新コマンドを表示"})
+        tr_format!(self.language, "{}\n\nCurrent: v{}\n{latest}\n{error}\nExit the app and run opixiv update in your terminal.\nYour saved works remain available.\nNo repository checkout or git pull is needed.\n\n{}\n\nEsc: Close", "{}\n\n現在: v{}\n{latest}\n{error}\n更新は、ツールを終了してPowerShellで opixiv update を実行します。\n保存済みの作品は引き続き利用できます。\nリポジトリへの移動やgit pullは不要です。\n\n{}\n\nEsc: この画面を閉じる",self.update_status.message(self.language),env!("CARGO_PKG_VERSION"),if self.worker.is_some(){self.language.text("A save is running. Press Enter after it finishes to show the update command.", "保存処理が動いています。終了後にEnterで更新コマンドを表示できます。")}else{self.language.text("Enter: Exit and show the update command", "Enter: ツールを終了し、コピー用の更新コマンドを表示")})
     }
     fn set_row(&mut self, key: String, status: String) {
         self.dirty = true;
@@ -741,13 +820,15 @@ impl App {
         self.complete = 0;
     }
     fn progress_label(&self) -> String {
-        format!(
+        tr_format!(
+            self.language,
+            "Text {} / {} {} / Requests {}/{}",
             "本文 {} / {} {} / 要求 {}/{}",
             self.body_ready,
             if self.text_only {
-                "本文保存完了"
+                self.language.text("Text complete", "本文保存完了")
             } else {
-                "全素材完了"
+                self.language.text("All assets complete", "全素材完了")
             },
             self.complete,
             self.requests,
@@ -760,7 +841,9 @@ impl App {
             transport["api"]["requests_per_second"].as_f64(),
             transport["media"]["requests_per_second"].as_f64(),
         ) {
-            format!(
+            tr_format!(
+                self.language,
+                "ACTIVITY · API {api:.2}/s Media {media:.2}/s · Reused {}",
                 "ACTIVITY · API {api:.2}/s 媒体 {media:.2}/s · 共有 {}",
                 transport["shared_media"]["hits"].as_u64().unwrap_or(0)
             )
@@ -773,11 +856,19 @@ impl App {
             self.rows
                 .get(self.selected)
                 .and_then(|r| r.output.clone())
-                .ok_or_else(|| invalid("選択した作品の保存フォルダーはまだありません。"))
+                .ok_or_else(|| {
+                    invalid(self.language.text(
+                        "The selected work has no output folder yet.",
+                        "選択した作品の保存フォルダーはまだありません。",
+                    ))
+                })
         } else {
             let value = self.out.value.trim();
             if value.is_empty() {
-                return Err(invalid("保存先を入力してください。"));
+                return Err(invalid(
+                    self.language
+                        .text("Enter an output folder.", "保存先を入力してください。"),
+                ));
             }
             Ok(PathBuf::from(value))
         }
@@ -785,75 +876,113 @@ impl App {
     fn open_folder(&mut self, selected: bool) {
         match self
             .folder(selected)
-            .and_then(|p| crate::folder::open(&p).map(|()| p))
+            .and_then(|p| crate::folder::open(&p, self.language).map(|()| p))
         {
-            Ok(path) => self.log(format!("フォルダーを開きました: {}", path.display())),
+            Ok(path) => self.log(tr_format!(
+                self.language,
+                "Opened folder: {}",
+                "フォルダーを開きました: {}",
+                path.display()
+            )),
             Err(e) => self.log(e.to_string()),
         }
     }
     fn summary(&self) -> String {
         let Some(v) = &self.last else {
-            return "まだ結果はありません。".into();
+            return self
+                .language
+                .text("No results yet.", "まだ結果はありません。")
+                .into();
         };
-        let mut lines = vec![format!("結果: {}", self.status), "".into()];
+        let mut lines = vec![
+            tr_format!(self.language, "Result: {}", "結果: {}", self.status),
+            "".into(),
+        ];
         if v["novel_scan"] == true {
-            lines.push(format!(
+            lines.push(tr_format!(
+                self.language,
+                "Fixed ID range: {}..{} / Checked {} / Remaining {}",
                 "固定したID範囲: {}〜{} / 確認済み {} / 残り {}",
-                v["first_id"], v["last_id"], v["processed_ids"], v["remaining_ids"]
+                v["first_id"],
+                v["last_id"],
+                v["processed_ids"],
+                v["remaining_ids"]
             ));
             lines
-                .push("IDの確認件数です。新着一覧の終端やPixiv全作品の件数とは異なります。".into());
+                .push(self.language.text("These are checked IDs, not the count of all Pixiv works or a new-feed endpoint.", "IDの確認件数です。新着一覧の終端やPixiv全作品の件数とは異なります。").into());
         }
         if v.get("selected").is_some() {
-            lines.push(format!(
+            lines.push(tr_format!(
+                self.language,
+                "Selected {} / Already saved {} / Pending {}",
                 "対象 {} / 保存済み {} / 未処理 {}",
-                v["selected"], v["already_complete"], v["unattempted_selected"]
+                v["selected"],
+                v["already_complete"],
+                v["unattempted_selected"]
             ));
-            lines.push(format!(
+            lines.push(tr_format!(
+                self.language,
+                "Previously excluded {} / Deferred by limit {}",
                 "過去の除外 {} / 上限で保留 {}",
-                v["previous_exclusions"], v["deferred_by_limit"]
+                v["previous_exclusions"],
+                v["deferred_by_limit"]
             ));
         }
         if let Some(elapsed) = v["elapsed_seconds"].as_f64() {
-            lines.push(format!(
+            lines.push(tr_format!(
+                self.language,
+                "Elapsed {elapsed:.1}s / Pacing wait {:.1}s / {} requests",
                 "所要 {elapsed:.1}秒 / 送信間隔の待機 {:.1}秒 / {}リクエスト",
                 v["rate_wait_seconds"].as_f64().unwrap_or(0.0),
                 v["requests"]
             ));
         }
         if v.get("body_ready_count").is_some() {
-            lines.push(format!(
+            lines.push(tr_format!(
+                self.language,
+                "Text available {} / {} {}",
                 "本文利用可能 {} / {} {}",
                 v["body_ready_count"],
                 if v["text_only"] == true {
-                    "本文保存完了"
+                    self.language.text("Text complete", "本文保存完了")
                 } else {
-                    "全素材完了"
+                    self.language.text("All assets complete", "全素材完了")
                 },
                 v["full_complete_count"]
             ));
         }
         if let Some(budget) = v["request_budget"].as_u64() {
-            lines.push(format!(
+            lines.push(tr_format!(
+                self.language,
+                "Requests used {} / Budget {}",
                 "要求使用 {} / 上限 {}",
                 v["requests"],
                 budget_label(budget as usize)
             ));
         }
         if let Some(reason) = v.get("stop_reason").filter(|reason| !reason.is_null()) {
-            lines.push(format!("停止理由: {}", stop_label(reason)));
-            lines.push(resume_hint(v).into());
+            lines.push(tr_format!(
+                self.language,
+                "Stopped: {}",
+                "停止理由: {}",
+                stop_label(self.language, reason)
+            ));
+            lines.push(resume_hint(self.language, v).into());
         }
         if let Some(reason) = v["reason"].as_str() {
             lines.push(reason.into());
         }
         if let Some(transport) = v.get("transport_metrics") {
-            lines.extend(transport_summary(transport));
+            lines.extend(transport_summary(self.language, transport));
         }
         if let Some(stages) = v["stage_seconds"].as_object() {
             for (name, value) in stages {
                 if let Some(seconds) = value.as_f64() {
-                    lines.push(format!("段階 {name}: {seconds:.2}秒（並行処理の合計）"));
+                    lines.push(tr_format!(
+                        self.language,
+                        "Stage {name}: {seconds:.2}s (sum across workers)",
+                        "段階 {name}: {seconds:.2}秒（並行処理の合計）"
+                    ));
                 }
             }
         }
@@ -863,10 +992,18 @@ impl App {
             }
         }
         if v.get("valid").is_some() {
-            lines.push(format!("検査: {} / {} 正常", v["valid"], v["checked"]));
+            lines.push(tr_format!(
+                self.language,
+                "Verify: {} / {} valid",
+                "検査: {} / {} 正常",
+                v["valid"],
+                v["checked"]
+            ));
         }
         if v.get("zip").is_some() {
-            lines.push(format!(
+            lines.push(tr_format!(
+                self.language,
+                "Output: {} / {} works",
                 "出力: {} / {}作品",
                 v["zip"].as_str().unwrap_or(""),
                 v["complete_works"]
@@ -884,7 +1021,9 @@ impl App {
                 }
                 if let Some(omissions) = item["omissions"].as_array() {
                     for o in omissions {
-                        lines.push(format!(
+                        lines.push(tr_format!(
+                            self.language,
+                            "Not saved: {} — {}",
                             "未保存: {} — {}",
                             o["resource"].as_str().unwrap_or(""),
                             o["reason"].as_str().unwrap_or("")
@@ -895,7 +1034,12 @@ impl App {
         }
         if let Some(problems) = v["problems"].as_array() {
             for p in problems {
-                lines.push(format!("\n欠損: {}", p["key"].as_str().unwrap_or("")));
+                lines.push(tr_format!(
+                    self.language,
+                    "\nMissing: {}",
+                    "\n欠損: {}",
+                    p["key"].as_str().unwrap_or("")
+                ));
                 if let Some(errors) = p["errors"].as_array() {
                     for e in errors {
                         lines.push(e.as_str().unwrap_or("").into());
@@ -910,11 +1054,19 @@ impl App {
         }
         for row in &self.rows {
             if let Some(path) = &row.output {
-                lines.push(format!("\n{} の保存先: {}", row.key, path.display()));
+                lines.push(tr_format!(
+                    self.language,
+                    "\n{} output: {}",
+                    "\n{} の保存先: {}",
+                    row.key,
+                    path.display()
+                ));
             }
         }
         if let Some(c) = v.get("collection") {
-            lines.push(format!(
+            lines.push(tr_format!(
+                self.language,
+                "\nCollection: Copied {} / Existing {} / Problems {}",
                 "\nファイル集約: コピー {} / 集約済み {} / 問題 {}",
                 c["copied"],
                 c["existing"],
@@ -955,9 +1107,10 @@ impl App {
         };
         match options.and_then(|options| crate::novel_scan::describe_selection(&options)) {
             Ok(scope) => {
-                self.confirm_scope = scope;
+                self.confirm_scope = scope.map(|message| message.render(self.language));
                 self.confirm_resume = resume;
                 self.modal = Modal::Confirm;
+                self.modal_scroll = 0;
             }
             Err(error) => self.log(error.to_string()),
         }
@@ -971,9 +1124,10 @@ impl App {
             .map(str::to_owned)
             .collect();
         if !resume && (values.is_empty() || values.len() > 1000) {
-            return Err(invalid(
+            return Err(invalid(self.language.text(
+                "Enter 1 to 1000 work, author, or search URLs.",
                 "作品・作者・タグ検索URLを1〜1000件入力してください。",
-            ));
+            )));
         }
         if !resume {
             for v in &values {
@@ -981,7 +1135,10 @@ impl App {
             }
         }
         if self.out.value.trim().is_empty() {
-            return Err(invalid("保存先を入力してください。"));
+            return Err(invalid(
+                self.language
+                    .text("Enter an output folder.", "保存先を入力してください。"),
+            ));
         }
         Ok(Options {
             targets: if resume { vec![] } else { values },
@@ -1017,7 +1174,11 @@ impl App {
             }
         } else {
             if self.out.value.trim().is_empty() {
-                self.log("保存先を入力してください。".into());
+                self.log(
+                    self.language
+                        .text("Enter an output folder.", "保存先を入力してください。")
+                        .into(),
+                );
                 return;
             }
             Options {
@@ -1027,7 +1188,11 @@ impl App {
         };
         if matches!(operation, "fetch" | "plan" | "resume") {
             if let Err(error) = self.save_preferences(&self.preferences(), false) {
-                self.log(format!("設定を保存できません: {error}"));
+                self.log(tr_format!(
+                    self.language,
+                    "Cannot save settings: {error}",
+                    "設定を保存できません: {error}"
+                ));
                 return;
             }
         }
@@ -1051,7 +1216,7 @@ impl App {
             "{} / {}",
             self.status,
             if self.demo {
-                "DEMO · 通信なし"
+                self.language.text("DEMO · OFFLINE", "DEMO · 通信なし")
             } else {
                 "LOCAL ARCHIVE"
             }
@@ -1101,7 +1266,7 @@ impl App {
             match e {
                 Event::ArchiveOpened(root) => self.run_out = Some(root),
                 Event::Existing { key, status } => self.set_row(key, status),
-                Event::Message(s) => self.log(s),
+                Event::Message(s) => self.log(s.render(self.language)),
                 Event::Selected {
                     total,
                     already,
@@ -1109,7 +1274,7 @@ impl App {
                     excluded,
                 } => {
                     self.total = total;
-                    self.log(format!("対象 {total} / 保存済み {already} / 保留 {deferred} / 過去の除外 {excluded}"));
+                    self.log(tr_format!(self.language, "Selected {total} / Already saved {already} / Deferred {deferred} / Previously excluded {excluded}", "対象 {total} / 保存済み {already} / 保留 {deferred} / 過去の除外 {excluded}"));
                 }
                 Event::Started(key) => self.set_row(key, "saving".into()),
                 Event::BodyReady { key } => self.set_row(key, "body_ready".into()),
@@ -1159,8 +1324,13 @@ impl App {
                     if let Some(reason) =
                         value.get("stop_reason").filter(|reason| !reason.is_null())
                     {
-                        self.log(format!("停止理由: {}", stop_label(reason)));
-                        self.log(resume_hint(&value).into());
+                        self.log(tr_format!(
+                            self.language,
+                            "Stopped: {}",
+                            "停止理由: {}",
+                            stop_label(self.language, reason)
+                        ));
+                        self.log(resume_hint(self.language, &value).into());
                     }
                     self.status = value["status"]
                         .as_str()
@@ -1175,7 +1345,12 @@ impl App {
                     if let Some(reason) = value["reason"].as_str() {
                         self.log(reason.into());
                     }
-                    self.log(format!("結果: {}", self.status));
+                    self.log(tr_format!(
+                        self.language,
+                        "Result: {}",
+                        "結果: {}",
+                        self.status
+                    ));
                     if let Some(targets) = value["selected_targets"].as_array() {
                         for t in targets {
                             if let Some(target) = t.as_str().and_then(|s| Target::parse(s).ok()) {
@@ -1184,24 +1359,32 @@ impl App {
                         }
                     }
                     if value.get("valid").is_some() {
-                        self.log(format!(
+                        self.log(tr_format!(
+                            self.language,
+                            "Verify: {} / {} valid",
                             "検査: {} / {} 正常",
-                            value["valid"], value["checked"]
+                            value["valid"],
+                            value["checked"]
                         ));
                     }
                     if let Some(problems) = value["problems"].as_array() {
                         for p in problems {
-                            self.log(format!("欠損: {}", p));
+                            self.log(tr_format!(self.language, "Missing: {}", "欠損: {}", p));
                         }
                     }
                     if value.get("complete_works").is_some() {
-                        self.log(format!(
+                        self.log(tr_format!(
+                            self.language,
+                            "ZIP: {} / {} works",
                             "ZIP: {} / {}作品",
-                            value["zip"], value["complete_works"]
+                            value["zip"],
+                            value["complete_works"]
                         ));
                     }
                     if value.get("unattempted_selected").is_some() {
-                        self.log(format!(
+                        self.log(tr_format!(
+                            self.language,
+                            "Pending: {} / Excluded: {} / Deferred by limit: {}",
                             "未処理: {} / 除外: {} / 上限保留: {}",
                             value["unattempted_selected"],
                             value["previous_exclusions"],
@@ -1209,14 +1392,18 @@ impl App {
                         ));
                     }
                     if let Some(elapsed) = value["elapsed_seconds"].as_f64() {
-                        self.log(format!(
+                        self.log(tr_format!(
+                            self.language,
+                            "Elapsed {elapsed:.1}s / Pacing wait {:.1}s / {} requests",
                             "所要 {elapsed:.1}秒 / 間隔待ち {:.1}秒 / {}回",
                             value["rate_wait_seconds"].as_f64().unwrap_or(0.0),
                             value["requests"]
                         ));
                     }
                     if let Some(c) = value.get("collection") {
-                        self.log(format!(
+                        self.log(tr_format!(
+                            self.language,
+                            "Collection: Copied {} / Existing {} / Problems {} · F4: Open",
                             "集約: コピー {} / 集約済み {} / 問題 {} · F4で開く",
                             c["copied"],
                             c["existing"],
@@ -1233,7 +1420,7 @@ impl App {
                 Event::Failed(s) => {
                     self.status = "FAILED".into();
                     self.log(if s.starts_with("Saved selection is incomplete") {
-                        "最新の対象一覧の取得が未完了です。元のURLを確認して再実行してください。以前の別の一覧は再開しません。".into()
+                        self.language.text("The latest selection is incomplete. Check the source URL and try again. An older selection will not be resumed.", "最新の対象一覧の取得が未完了です。元のURLを確認して再実行してください。以前の別の一覧は再開しません。").into()
                     } else { s });
                     finished = true;
                 }
@@ -1245,7 +1432,14 @@ impl App {
             }
         } else if worker_done {
             self.status = "FAILED".into();
-            self.log("ワーカーが予期せず終了しました。".into());
+            self.log(
+                self.language
+                    .text(
+                        "A worker stopped unexpectedly.",
+                        "ワーカーが予期せず終了しました。",
+                    )
+                    .into(),
+            );
             if let Some(w) = self.worker.take() {
                 let _ = w.handle.join();
             }
@@ -1255,7 +1449,14 @@ impl App {
         if let Some(w) = &self.worker {
             w.stop.store(true, Ordering::SeqCst);
             self.status = "STOPPING".into();
-            self.log("停止中… 保存済みデータを保持して処理の終了を待ちます。".into());
+            self.log(
+                self.language
+                    .text(
+                        "Stopping… Keeping saved data while waiting for workers to finish.",
+                        "停止中… 保存済みデータを保持して処理の終了を待ちます。",
+                    )
+                    .into(),
+            );
         }
     }
     fn key(&mut self, key: KeyEvent) -> bool {
@@ -1277,16 +1478,12 @@ impl App {
         if self.modal != Modal::None {
             match key.code {
                 KeyCode::Esc => self.modal = Modal::None,
-                KeyCode::Down | KeyCode::PageDown
-                    if matches!(self.modal, Modal::Result | Modal::Collection) =>
-                {
+                KeyCode::Down | KeyCode::PageDown => {
                     self.modal_scroll = self
                         .modal_scroll
                         .saturating_add(if key.code == KeyCode::Down { 1 } else { 5 })
                 }
-                KeyCode::Up | KeyCode::PageUp
-                    if matches!(self.modal, Modal::Result | Modal::Collection) =>
-                {
+                KeyCode::Up | KeyCode::PageUp => {
                     self.modal_scroll = self
                         .modal_scroll
                         .saturating_sub(if key.code == KeyCode::Up { 1 } else { 5 })
@@ -1336,6 +1533,7 @@ impl App {
         }
         if key.code == KeyCode::F(1) {
             self.modal = Modal::Help;
+            self.modal_scroll = 0;
             return false;
         }
         if key.code == KeyCode::F(3) {
@@ -1367,6 +1565,7 @@ impl App {
         }
         if key.code == KeyCode::F(9) {
             self.modal = Modal::Update;
+            self.modal_scroll = 0;
             return false;
         }
         if key.code == KeyCode::F(6) {
@@ -1430,9 +1629,13 @@ impl App {
                 std::mem::swap(&mut self.urls, &mut self.other_urls);
                 self.log(
                     if self.demo {
-                        "デモ: 合成4作品・通信なし"
+                        self.language.text(
+                            "Demo: 4 synthetic works, offline",
+                            "デモ: 合成4作品・通信なし",
+                        )
                     } else {
-                        "オンライン: 匿名取得・実サイト未検証"
+                        self.language
+                            .text("Online: Anonymous downloads", "オンライン: 匿名取得")
                     }
                     .into(),
                 );
@@ -1474,7 +1677,8 @@ impl App {
                 if let Some(view) = View::new(area) {
                     let popup = popup_rect(view.body, &self.modal);
                     let point = ratatui::layout::Position::new(event.column, event.row);
-                    let (legacy, balanced, budget, presets, apply) = settings_controls(popup);
+                    let (legacy, balanced, budget, presets, apply) =
+                        settings_controls(self.language, popup);
                     if legacy.contains(point) {
                         self.settings_balanced = false;
                         self.settings_focus = 0;
@@ -1496,6 +1700,9 @@ impl App {
                             self.settings_focus = i + 4;
                             if i == 1 {
                                 self.settings_text_only = !self.settings_text_only;
+                            }
+                            if i == 2 {
+                                self.settings_language = self.settings_language.toggle();
                             }
                         }
                     }
@@ -1528,22 +1735,23 @@ impl App {
                 }
                 if details.contains(point) {
                     self.modal = Modal::Update;
+                    self.modal_scroll = 0;
                     return;
                 }
             }
-            if let Some(settings) = settings_button(view.footer) {
+            if let Some(settings) = settings_button(self.language, view.footer) {
                 if settings.contains(point) {
                     self.open_settings();
                     return;
                 }
             }
-            if let Some(resume) = resume_button(view.footer) {
+            if let Some(resume) = resume_button(self.language, view.footer) {
                 if resume.contains(point) && self.worker.is_none() {
                     let _ = self.key(KeyEvent::new(KeyCode::F(11), KeyModifiers::NONE));
                     return;
                 }
             }
-            let (root, work) = buttons(view.footer);
+            let (root, work) = buttons(self.language, view.footer);
             if root.contains(point) {
                 self.open_folder(false);
                 return;
@@ -1552,7 +1760,7 @@ impl App {
                 self.open_folder(true);
                 return;
             }
-            if let Some((image, novel)) = collection_buttons(view.footer) {
+            if let Some((image, novel)) = collection_buttons(self.language, view.footer) {
                 if image.contains(point) {
                     self.open_collection("image");
                     return;
@@ -1586,15 +1794,26 @@ impl App {
         self.selected.saturating_sub(visible.saturating_sub(1))
     }
 }
-fn row_status(value: &str) -> &str {
+fn welcome(language: Language) -> VecDeque<String> {
+    VecDeque::from([
+        "Welcome to Open Pixiv Downloader!".into(),
+        language
+            .text(
+                "Paste work, author, novel series, or search URLs.",
+                "作品・作者・小説シリーズ・タグ検索のURLを貼り付けてください。",
+            )
+            .into(),
+    ])
+}
+fn row_status(language: Language, value: &str) -> &str {
     match value {
-        "body_ready" => "本文保存済み",
-        "assets_pending" => "素材待ち",
-        "verifying" => "検証中",
-        "complete" => "完了",
-        "already_complete" => "保存済み",
-        "partial" => "欠損あり",
-        "paused" => "一時停止",
+        "body_ready" => language.text("Text saved", "本文保存済み"),
+        "assets_pending" => language.text("Assets pending", "素材待ち"),
+        "verifying" => language.text("Verifying", "検証中"),
+        "complete" => language.text("Complete", "完了"),
+        "already_complete" => language.text("Already saved", "保存済み"),
+        "partial" => language.text("Missing assets", "欠損あり"),
+        "paused" => language.text("Paused", "一時停止"),
         _ => value,
     }
 }
@@ -1690,15 +1909,21 @@ impl View {
         })
     }
 }
-fn button_labels(footer: Rect) -> (&'static str, &'static str) {
+fn button_labels(language: Language, footer: Rect) -> (&'static str, &'static str) {
     if footer.width >= 70 {
-        ("[ F6 保存先を開く ]", "[ F7 選択作品を開く ]")
+        (
+            language.text("[ F6 Open output ]", "[ F6 保存先を開く ]"),
+            language.text("[ F7 Open work ]", "[ F7 選択作品を開く ]"),
+        )
     } else {
-        ("[F6 保存先]", "[F7 選択作品]")
+        (
+            language.text("[F6 Output]", "[F6 保存先]"),
+            language.text("[F7 Work]", "[F7 選択作品]"),
+        )
     }
 }
-fn buttons(footer: Rect) -> (Rect, Rect) {
-    let (root, work) = button_labels(footer);
+fn buttons(language: Language, footer: Rect) -> (Rect, Rect) {
+    let (root, work) = button_labels(language, footer);
     let y = footer.y.saturating_add(1);
     let root_width = UnicodeWidthStr::width(root) as u16;
     let work_width = UnicodeWidthStr::width(work) as u16;
@@ -1707,11 +1932,13 @@ fn buttons(footer: Rect) -> (Rect, Rect) {
         Rect::new(footer.x + root_width + 1, y, work_width, 1),
     )
 }
-fn collection_buttons(footer: Rect) -> Option<(Rect, Rect)> {
-    let (_, work) = buttons(footer);
+fn collection_buttons(language: Language, footer: Rect) -> Option<(Rect, Rect)> {
+    let (_, work) = buttons(language, footer);
     let x = work.right() + 1;
-    let image_width = UnicodeWidthStr::width("[画像 Alt+I]") as u16;
-    let novel_width = UnicodeWidthStr::width("[小説 Alt+N]") as u16;
+    let image_width =
+        UnicodeWidthStr::width(language.text("[Images Alt+I]", "[画像 Alt+I]")) as u16;
+    let novel_width =
+        UnicodeWidthStr::width(language.text("[Novels Alt+N]", "[小説 Alt+N]")) as u16;
     if x + image_width + 1 + novel_width > footer.right() {
         return None;
     }
@@ -1720,23 +1947,30 @@ fn collection_buttons(footer: Rect) -> Option<(Rect, Rect)> {
         Rect::new(x + image_width + 1, work.y, novel_width, 1),
     ))
 }
-fn settings_button(footer: Rect) -> Option<Rect> {
-    let (_, work) = buttons(footer);
-    let x = collection_buttons(footer).map_or(work.right() + 1, |(_, novel)| novel.right() + 1);
-    let width = UnicodeWidthStr::width("[F10 設定]") as u16;
+fn settings_button(language: Language, footer: Rect) -> Option<Rect> {
+    let (_, work) = buttons(language, footer);
+    let x = collection_buttons(language, footer)
+        .map_or(work.right() + 1, |(_, novel)| novel.right() + 1);
+    let width = UnicodeWidthStr::width(language.text("[F10 Settings]", "[F10 設定]")) as u16;
     (x + width <= footer.right()).then_some(Rect::new(x, work.y, width, 1))
 }
-fn resume_button(footer: Rect) -> Option<Rect> {
-    let settings = settings_button(footer)?;
-    let width = UnicodeWidthStr::width("[再開 Ctrl+R]") as u16;
+fn resume_button(language: Language, footer: Rect) -> Option<Rect> {
+    let settings = settings_button(language, footer)?;
+    let width = UnicodeWidthStr::width(language.text("[Resume Ctrl+R]", "[再開 Ctrl+R]")) as u16;
     let x = settings.right() + 1;
     (x + width <= footer.right()).then_some(Rect::new(x, settings.y, width, 1))
 }
-fn profile_label(balanced: bool, interval: f64, api_interval: f64) -> String {
+fn profile_label(language: Language, balanced: bool, interval: f64, api_interval: f64) -> String {
     if balanced {
-        format!("分離: 全体{interval}秒/API{api_interval}秒/媒体{interval}秒")
+        tr_format!(
+            language,
+            "Separate: Global {interval}s/API {api_interval}s/Media {interval}s",
+            "分離: 全体{interval}秒/API{api_interval}秒/媒体{interval}秒"
+        )
     } else {
-        "互換: 全通信2秒間隔".into()
+        language
+            .text("Compatible: 2s for all requests", "互換: 全通信2秒間隔")
+            .into()
     }
 }
 fn budget_label(budget: usize) -> String {
@@ -1746,56 +1980,89 @@ fn budget_label(budget: usize) -> String {
         budget.to_string()
     }
 }
-fn stop_label(value: &Value) -> String {
+fn stop_label(language: Language, value: &Value) -> String {
     match value["kind"].as_str() {
-        Some("user_cancel") => "ユーザー操作で停止".into(),
-        Some("request_budget") => "要求予算に到達・進行中の保存を保持".into(),
-        Some("http_status") => format!("HTTP {}により停止", value["status"]),
-        Some("unexpected_content") => "期待と異なる応答で停止".into(),
-        Some("search_incomplete") => "検索一覧の列挙が未完了".into(),
-        Some("worker_error") => "ワーカー異常で停止".into(),
-        Some("disk_error") => "保存領域の問題で停止".into(),
+        Some("user_cancel") => language
+            .text("Stopped by user", "ユーザー操作で停止")
+            .into(),
+        Some("request_budget") => language
+            .text(
+                "Request budget reached; active saves retained",
+                "要求予算に到達・進行中の保存を保持",
+            )
+            .into(),
+        Some("http_status") => tr_format!(
+            language,
+            "Stopped by HTTP {}",
+            "HTTP {}により停止",
+            value["status"]
+        ),
+        Some("unexpected_content") => language
+            .text("Stopped on unexpected content", "期待と異なる応答で停止")
+            .into(),
+        Some("search_incomplete") => language
+            .text("Search listing is incomplete", "検索一覧の列挙が未完了")
+            .into(),
+        Some("worker_error") => language
+            .text("Stopped on worker error", "ワーカー異常で停止")
+            .into(),
+        Some("disk_error") => language
+            .text("Stopped on storage error", "保存領域の問題で停止")
+            .into(),
         _ => clean(&value.to_string()),
     }
 }
-fn resume_hint(value: &Value) -> &'static str {
+fn resume_hint(language: Language, value: &Value) -> &'static str {
     if value["discovery_complete"] == false {
         if value["discovery_resumable"] == true {
-            "F11で保存済み検索ページから一覧の列挙を続けられます。検索条件による未達なら条件を絞って再実行してください。"
+            language.text("F11: Continue listing from cached search pages. If filters prevent completion, narrow the search and try again.", "F11で保存済み検索ページから一覧の列挙を続けられます。検索条件による未達なら条件を絞って再実行してください。")
         } else {
-            "対象一覧が未確定です。元のURLから再実行してください。以前の別の一覧は再開しません。"
+            language.text("Selection is incomplete. Run the source URL again. An older selection will not be resumed.", "対象一覧が未確定です。元のURLから再実行してください。以前の別の一覧は再開しません。")
         }
     } else {
-        "F11で最新の保存対象一覧から再開できます。F10で次回の予算を設定できます。"
+        language.text(
+            "F11: Resume the latest selection. F10: Change the next request budget.",
+            "F11で最新の保存対象一覧から再開できます。F10で次回の予算を設定できます。",
+        )
     }
 }
-fn transport_summary(value: &Value) -> Vec<String> {
+fn transport_summary(language: Language, value: &Value) -> Vec<String> {
     let mut lines = Vec::new();
-    for (key, label) in [("api", "API"), ("media", "媒体")] {
+    for (key, label) in [("api", "API"), ("media", language.text("Media", "媒体"))] {
         let item = &value[key];
         if let Some(requests) = item["requests"].as_u64() {
-            lines.push(format!(
+            lines.push(tr_format!(
+                language,
+                "{label}: {requests} requests / {:.2} requests/s / {:.2} MiB",
                 "{label}: {requests}要求 / {:.2}要求毎秒 / {:.2}MiB",
                 item["requests_per_second"].as_f64().unwrap_or(0.0),
                 item["bytes"].as_u64().unwrap_or(0) as f64 / (1024.0 * 1024.0)
             ));
         }
         if let Some(p95) = item["header_p95_seconds"].as_f64() {
-            lines.push(format!(
+            lines.push(tr_format!(
+                language,
+                "{label} header p95 {p95:.2}s / Transfer p95 {:.2}s",
                 "{label} ヘッダー待ちp95 {p95:.2}秒 / 転送p95 {:.2}秒",
                 item["transfer_p95_seconds"].as_f64().unwrap_or(0.0)
             ));
         }
     }
     if let Some(hits) = value["shared_media"]["hits"].as_u64() {
-        lines.push(format!(
+        lines.push(tr_format!(
+            language,
+            "Shared media: Reused {hits} / Fetched {} / Cache {:.2} MiB",
             "媒体の共有: 再利用 {hits} / 新規取得 {} / キャッシュ {:.2}MiB",
             value["shared_media"]["misses"].as_u64().unwrap_or(0),
             value["shared_media"]["cache_bytes"].as_u64().unwrap_or(0) as f64 / (1024.0 * 1024.0)
         ));
     }
     if let Some(retries) = value["retries"].as_u64() {
-        lines.push(format!("追加試行: {retries}回"));
+        lines.push(tr_format!(
+            language,
+            "Retries: {retries}",
+            "追加試行: {retries}回"
+        ));
     }
     lines
 }
@@ -1808,7 +2075,8 @@ fn popup_rect(body: Rect, modal: &Modal) -> Rect {
         Modal::Result => 24,
         Modal::Update => 19,
         Modal::Collection => 20,
-        Modal::Settings | Modal::Confirm => 16,
+        Modal::Settings => 17,
+        Modal::Confirm => 16,
         Modal::None => 12,
     });
     Rect::new(
@@ -1818,21 +2086,32 @@ fn popup_rect(body: Rect, modal: &Modal) -> Rect {
         height,
     )
 }
-fn settings_controls(popup: Rect) -> (Rect, Rect, Rect, [Rect; 3], Rect) {
+fn settings_controls(language: Language, popup: Rect) -> (Rect, Rect, Rect, [Rect; 3], Rect) {
     let inner = popup.inner(ratatui::layout::Margin::new(1, 1));
     let control = |x, y, width, height| {
         Rect::new(popup.x + x, popup.y + y, width, height).intersection(inner)
     };
     (
-        control(2, 2, 12, 1),
-        control(17, 2, UnicodeWidthStr::width(BALANCED_BUTTON) as u16, 1),
+        control(
+            2,
+            2,
+            UnicodeWidthStr::width(language.text("[ Legacy 2s ]", "[ 互換 2秒 ]")) as u16,
+            1,
+        ),
+        control(
+            17,
+            2,
+            UnicodeWidthStr::width(language.text("[ Separate API/media ]", "[ API・媒体を分離 ]"))
+                as u16,
+            1,
+        ),
         control(2, 3, popup.width.saturating_sub(4), 3),
         [
             control(2, 6, 10, 1),
             control(13, 6, 11, 1),
             control(25, 6, 12, 1),
         ],
-        control(2, 13, 14, 1),
+        control(2, 14, 16, 1),
     )
 }
 fn interval_controls(popup: Rect) -> [Rect; 2] {
@@ -1841,8 +2120,8 @@ fn interval_controls(popup: Rect) -> [Rect; 2] {
     let fields = Layout::horizontal([Constraint::Percentage(50); 2]).split(area);
     [fields[0], fields[1]]
 }
-fn text_settings_controls(popup: Rect) -> [Rect; 2] {
-    [10, 11].map(|offset| {
+fn text_settings_controls(popup: Rect) -> [Rect; 3] {
+    [10, 11, 12].map(|offset| {
         Rect::new(
             popup.x + 2,
             popup.y + offset,
@@ -1854,9 +2133,18 @@ fn text_settings_controls(popup: Rect) -> [Rect; 2] {
 }
 fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
     frame.render_widget(Clear, popup);
-    frame.render_widget(panel("保存設定 · Tabで移動 / Enterで記憶", true), popup);
+    frame.render_widget(
+        panel(
+            app.language.text(
+                "Settings · Tab: Move / Enter: Save / Esc: Cancel",
+                "保存設定 · Tabで移動 / Enterで記憶",
+            ),
+            true,
+        ),
+        popup,
+    );
     let inner = popup.inner(ratatui::layout::Margin::new(1, 1));
-    let (legacy, balanced, budget, presets, apply) = settings_controls(popup);
+    let (legacy, balanced, budget, presets, apply) = settings_controls(app.language, popup);
     let row = |offset| {
         Rect::new(
             popup.x + 2,
@@ -1867,12 +2155,25 @@ fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
         .intersection(inner)
     };
     frame.render_widget(
-        Paragraph::new("通信プロファイル  ← / → で切替").style(Style::default().fg(MUTED)),
+        Paragraph::new(app.language.text(
+            "Request pacing  ← / → to switch",
+            "通信プロファイル  ← / → で切替",
+        ))
+        .style(Style::default().fg(MUTED)),
         row(1),
     );
     for (rect, text, selected) in [
-        (legacy, "[ 互換 2秒 ]", !app.settings_balanced),
-        (balanced, BALANCED_BUTTON, app.settings_balanced),
+        (
+            legacy,
+            app.language.text("[ Legacy 2s ]", "[ 互換 2秒 ]"),
+            !app.settings_balanced,
+        ),
+        (
+            balanced,
+            app.language
+                .text("[ Separate API/media ]", "[ API・媒体を分離 ]"),
+            app.settings_balanced,
+        ),
     ] {
         frame.render_widget(
             Paragraph::new(text).style(
@@ -1892,7 +2193,7 @@ fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
         frame,
         global,
         &app.settings_interval,
-        "全体・媒体 秒",
+        app.language.text("Global/media s", "全体・媒体 秒"),
         app.settings_focus == 2,
         "",
     );
@@ -1900,24 +2201,34 @@ fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
         frame,
         api,
         &app.settings_api_interval,
-        "API 秒",
+        app.language.text("API s", "API 秒"),
         app.settings_focus == 3,
         "",
     );
     for (i, (rect, text)) in text_settings_controls(popup)
         .into_iter()
         .zip([
-            format!(
+            tr_format!(
+                app.language,
+                "Workers: {}  ← / → to change (1..{MAX_JOBS})",
                 "並列: {}作品  ← / → で変更（1〜{MAX_JOBS}）",
                 app.settings_jobs
             ),
-            format!(
+            tr_format!(
+                app.language,
+                "Save: {}  ← / → to switch",
                 "保存: {}  ← / → で切替",
                 if app.settings_text_only {
-                    "本文のみ TXT"
+                    app.language.text("Text-only TXT", "本文のみ TXT")
                 } else {
-                    "標準アーカイブ"
+                    app.language.text("Standard archive", "標準アーカイブ")
                 }
+            ),
+            tr_format!(
+                app.language,
+                "Language: {}  ← / →",
+                "言語: {}  ← / →",
+                app.settings_language.text("English", "日本語")
             ),
         ])
         .enumerate()
@@ -1935,24 +2246,29 @@ fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
         frame,
         budget,
         &app.settings_budget,
-        "要求予算 · 0=∞ / 1〜1000000回",
+        app.language.text(
+            "Request budget · 0=∞ / 1..1000000",
+            "要求予算 · 0=∞ / 1〜1000000回",
+        ),
         app.settings_focus == 1,
         "",
     );
-    for (rect, label) in presets
-        .into_iter()
-        .zip(["[F1 500]", "[F2 5000]", "[F3 100万]"])
-    {
+    for (rect, label) in presets.into_iter().zip([
+        "[F1 500]",
+        "[F2 5000]",
+        app.language.text("[F3 1M]", "[F3 100万]"),
+    ]) {
         frame.render_widget(Paragraph::new(label).style(Style::default().fg(CYAN)), rect);
     }
     if let Some(error) = &app.settings_error {
         frame.render_widget(
             Paragraph::new(error.as_str()).style(Style::default().fg(Color::Yellow)),
-            row(12),
+            row(13),
         );
     }
     frame.render_widget(
-        Paragraph::new("[Enter 保存]").style(Style::default().fg(CYAN)),
+        Paragraph::new(app.language.text("[Enter Save]", "[Enter 保存]"))
+            .style(Style::default().fg(CYAN)),
         apply,
     );
 }
@@ -1963,7 +2279,7 @@ fn update_controls(header: Rect) -> Option<(Rect, Rect, Rect)> {
     let row = Rect::new(header.x, header.bottom() - 1, header.width, 1);
     let controls = Layout::horizontal([
         Constraint::Min(1),
-        Constraint::Length(9),
+        Constraint::Length(10),
         Constraint::Length(13),
     ])
     .split(row);
@@ -2009,7 +2325,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         area,
     );
     let Some(view) = View::new(area) else {
-        frame.render_widget(Paragraph::new("OPEN PIXIV DOWNLOADER\n\n端末を32桁×12行以上に広げてください。\nEsc / Ctrl+C: 終了").wrap(Wrap{trim:false}),area);
+        frame.render_widget(Paragraph::new(app.language.text("OPEN PIXIV DOWNLOADER\n\nResize the terminal to at least 32 columns by 12 rows.\nEsc / Ctrl+C: Quit", "OPEN PIXIV DOWNLOADER\n\n端末を32桁×12行以上に広げてください。\nEsc / Ctrl+C: 終了")).wrap(Wrap{trim:false}),area);
         return;
     };
     let body = view.body;
@@ -2058,14 +2374,14 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
     if let Some((notice, check, details)) = update_controls(view.header) {
         let available = matches!(app.update_status, update::Status::Available(_));
         let text = if notice.width >= 48 {
-            app.update_status.message()
+            app.update_status.message(app.language)
         } else {
             match app.update_status {
-                update::Status::Available(_) => "更新あり！".into(),
-                update::Status::Checking => "確認中…".into(),
-                update::Status::Current(_) => "更新なし".into(),
-                update::Status::Failed(_) => "確認不可".into(),
-                update::Status::Unchecked => "未確認".into(),
+                update::Status::Available(_) => app.language.text("Update!", "更新あり！").into(),
+                update::Status::Checking => app.language.text("Checking…", "確認中…").into(),
+                update::Status::Current(_) => app.language.text("Current", "更新なし").into(),
+                update::Status::Failed(_) => app.language.text("Unavailable", "確認不可").into(),
+                update::Status::Unchecked => app.language.text("Unchecked", "未確認").into(),
             }
         };
         frame.render_widget(
@@ -2081,15 +2397,13 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             notice,
         );
         frame.render_widget(
-            Paragraph::new("[F8 確認]").style(Style::default().fg(MUTED)),
+            Paragraph::new(app.language.text("[F8 Check]", "[F8 確認]"))
+                .style(Style::default().fg(MUTED)),
             check,
         );
         frame.render_widget(
-            Paragraph::new("[F9 更新方法]").style(Style::default().fg(if available {
-                CYAN
-            } else {
-                MUTED
-            })),
+            Paragraph::new(app.language.text("[F9 Update]", "[F9 更新方法]"))
+                .style(Style::default().fg(if available { CYAN } else { MUTED })),
             details,
         );
     }
@@ -2102,7 +2416,10 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         frame,
         fields[0],
         &app.urls,
-        "01  URL INPUT · 1行に1URL",
+        app.language.text(
+            "01  URL INPUT · One URL per line",
+            "01  URL INPUT · 1行に1URL",
+        ),
         app.focus == 0 && app.worker.is_none() && app.modal == Modal::None,
         "https://www.pixiv.net/artworks/…",
     );
@@ -2113,12 +2430,14 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             frame,
             opts[0],
             &app.out,
-            "02  保存先",
+            app.language.text("02  Output folder", "02  保存先"),
             app.focus == 1 && app.worker.is_none() && app.modal == Modal::None,
             "",
         );
         frame.render_widget(
-            Paragraph::new(format!(
+            Paragraph::new(tr_format!(
+                app.language,
+                "  {} · {} workers · F10 Settings",
                 "  {} · {}作品 · F10 設定",
                 if app.demo {
                     "DEMO · OFFLINE"
@@ -2127,7 +2446,13 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
                 },
                 app.jobs
             ))
-            .block(panel("03  MODE / WORKERS · F10設定", app.focus == 2)),
+            .block(panel(
+                app.language.text(
+                    "03  MODE / WORKERS · F10 Settings",
+                    "03  MODE / WORKERS · F10設定",
+                ),
+                app.focus == 2,
+            )),
             opts[1],
         );
     } else {
@@ -2137,7 +2462,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             frame,
             opts[0],
             &app.out,
-            "保存先",
+            app.language.text("Output folder", "保存先"),
             app.focus == 1 && app.worker.is_none() && app.modal == Modal::None,
             "",
         );
@@ -2147,7 +2472,10 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
                 if app.demo { "DEMO" } else { "ONLINE" },
                 app.jobs
             ))
-            .block(panel("並行数 ← →", app.focus == 2)),
+            .block(panel(
+                app.language.text("Workers ← →", "並行数 ← →"),
+                app.focus == 2,
+            )),
             opts[1],
         );
     }
@@ -2156,11 +2484,26 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             Paragraph::new(vec![
                 Line::from(""),
                 Line::from("  Welcome to Open Pixiv Downloader!"),
-                Line::from("  F2: デモの4作品で試す"),
-                Line::from("  URL入力 → Ctrl+S: 保存を確認"),
-                Line::from("  F5: 対象一覧 / Alt+V: 検査"),
-                Line::from("  Alt+E: ZIP出力 / F1: ヘルプ"),
-                Line::from("  F6: 保存先 / F7: 選択作品を開く"),
+                Line::from(
+                    app.language
+                        .text("  F2: Try 4 demo works", "  F2: デモの4作品で試す"),
+                ),
+                Line::from(app.language.text(
+                    "  Paste URLs → Ctrl+S: Confirm save",
+                    "  URL入力 → Ctrl+S: 保存を確認",
+                )),
+                Line::from(app.language.text(
+                    "  F5: List works / Alt+V: Verify",
+                    "  F5: 対象一覧 / Alt+V: 検査",
+                )),
+                Line::from(app.language.text(
+                    "  Alt+E: Export ZIP / F1: Help",
+                    "  Alt+E: ZIP出力 / F1: ヘルプ",
+                )),
+                Line::from(app.language.text(
+                    "  F6: Output / F7: Open selected work",
+                    "  F6: 保存先 / F7: 選択作品を開く",
+                )),
             ])
             .block(panel("QUEUE / LIBRARY", false)),
             view.queue,
@@ -2172,7 +2515,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         let rows = app.rows.iter().skip(offset).take(visible).map(|row| {
             Row::new([
                 clean(&row.key),
-                row_status(&row.status).to_owned(),
+                row_status(app.language, &row.status).to_owned(),
                 path_label(row.output.as_deref(), path_width),
             ])
             .style(Style::default().fg(match row.status.as_str() {
@@ -2199,7 +2542,13 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
                     .bg(Color::Rgb(27, 44, 62))
                     .add_modifier(Modifier::BOLD),
             )
-            .block(panel("QUEUE · ↑↓ 選択 / Enter 開く", app.focus == 3)),
+            .block(panel(
+                app.language.text(
+                    "QUEUE · ↑↓ Select / Enter Open",
+                    "QUEUE · ↑↓ 選択 / Enter 開く",
+                ),
+                app.focus == 3,
+            )),
             view.queue,
             &mut state,
         );
@@ -2228,8 +2577,8 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
     } else {
         0.0
     };
-    let (root, work) = buttons(view.footer);
-    let (root_label, work_label) = button_labels(view.footer);
+    let (root, work) = buttons(app.language, view.footer);
+    let (root_label, work_label) = button_labels(app.language, view.footer);
     frame.render_widget(
         Paragraph::new(root_label).style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
         root,
@@ -2242,25 +2591,29 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         Paragraph::new(work_label).style(Style::default().fg(if can_open { CYAN } else { MUTED })),
         work,
     );
-    if let Some((image, novel)) = collection_buttons(view.footer) {
+    if let Some((image, novel)) = collection_buttons(app.language, view.footer) {
         frame.render_widget(
-            Paragraph::new("[画像 Alt+I]").style(Style::default().fg(CYAN)),
+            Paragraph::new(app.language.text("[Images Alt+I]", "[画像 Alt+I]"))
+                .style(Style::default().fg(CYAN)),
             image,
         );
         frame.render_widget(
-            Paragraph::new("[小説 Alt+N]").style(Style::default().fg(CYAN)),
+            Paragraph::new(app.language.text("[Novels Alt+N]", "[小説 Alt+N]"))
+                .style(Style::default().fg(CYAN)),
             novel,
         );
     }
-    if let Some(settings) = settings_button(view.footer) {
+    if let Some(settings) = settings_button(app.language, view.footer) {
         frame.render_widget(
-            Paragraph::new("[F10 設定]").style(Style::default().fg(CYAN)),
+            Paragraph::new(app.language.text("[F10 Settings]", "[F10 設定]"))
+                .style(Style::default().fg(CYAN)),
             settings,
         );
     }
-    if let Some(resume) = resume_button(view.footer) {
+    if let Some(resume) = resume_button(app.language, view.footer) {
         frame.render_widget(
-            Paragraph::new("[再開 Ctrl+R]").style(Style::default().fg(CYAN)),
+            Paragraph::new(app.language.text("[Resume Ctrl+R]", "[再開 Ctrl+R]"))
+                .style(Style::default().fg(CYAN)),
             resume,
         );
     }
@@ -2282,8 +2635,11 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         foot[0],
     );
     frame.render_widget(
-        Paragraph::new("Ctrl+S 保存   F10 設定   F11 再開   F4 集約   F1 ヘルプ   Esc 終了")
-            .style(Style::default().fg(MUTED)),
+        Paragraph::new(app.language.text(
+            "Ctrl+S Save   F10 Settings   F11 Resume   F4 Collect   F1 Help   Esc Quit",
+            "Ctrl+S 保存   F10 設定   F11 再開   F4 集約   F1 ヘルプ   Esc 終了",
+        ))
+        .style(Style::default().fg(MUTED)),
         foot[2],
     );
     if app.modal != Modal::None {
@@ -2294,7 +2650,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         }
         frame.render_widget(Clear, popup);
         let text = if app.modal == Modal::Help {
-            "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者・タグ検索URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 保存モード・並列・通信・予算（設定を記憶） / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n列挙中の予算切れ・取消もF11で続行。条件による未達は元URLで再確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜8\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n実サイト・Windows実機は未検証のα版です。\nEnter: URL改行 / Esc: この画面を閉じる".to_owned()
+            app.language.text("Paste URLs, then press Ctrl+S → Enter to save.\nAuthor and search URLs include all successfully listed works.\n\nTab / Shift+Tab: Move between inputs and work list\nF2: Demo ↔ Anonymous online (separate inputs/output)\nF3: Results and missing assets / Up/Down: Scroll\nF4: Collect images/novels / Alt+I or N: Open\nF5: List works (no media downloads)\nF6: Open output / F7: Open selected work\nF8: Check updates / F9: Update instructions\nF10: Save mode, workers, pacing, budget, language (remembered)\nF11 / Ctrl+R: Resume the latest saved selection\nF5 → F11: Save the latest plan without listing again\nF11 also continues a listing paused by budget/cancel.\nIf filters prevent completion, check the source URL.\nCtrl+S: Confirm save / Enter: Start\nAlt+V: Verify / Alt+E: Export to output-export.zip\nWorkers field: Left/Right or 1..8\nList: Up/Down to select / Enter to open folder\nPgUp / PgDn: Move 5 works\nEsc / Ctrl+C: Stop active job; quit when idle\n\nReview results and omissions after saving.\nEnter: New URL line / Up/Down: Scroll / Esc: Close", "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者・タグ検索URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 保存モード・並列・通信・予算・言語（設定を記憶） / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n列挙中の予算切れ・取消もF11で続行。条件による未達は元URLで再確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜8\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n保存後は結果と欠損を確認してください。\nEnter: URL改行 / Esc: この画面を閉じる").to_owned()
         } else if app.modal == Modal::Collection {
             app.collection_details()
         } else if app.modal == Modal::Update {
@@ -2302,31 +2658,28 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         } else if app.modal == Modal::Result {
             app.summary()
         } else {
-            format!("{}\n\n対象: {}\n保存先: {}\n保存方式: {}\n並行保存: {}作品\n通信: {}\n要求予算: {}（F10で変更）\n\n{}\n\nEnter: 保存開始    Esc: 入力へ戻る",if app.demo{"合成データを保存します · 通信なし"}else{"Pixivへ匿名で接続します"},if let Some(scope) = &app.confirm_scope { scope.clone() } else if app.confirm_resume { "最新の保存対象一覧から再開（job / plan）".into() }else{format!("入力{}件（作者・タグ検索URLは作品一覧へ展開）",app.urls.value.split_whitespace().count())},clean(&app.out.value),if app.text_only { "本文のみ TXT（novel/novel_ID.txt）" } else { "標準アーカイブ" },app.jobs,profile_label(app.balanced, app.interval, app.api_interval),budget_label(app.request_budget),if app.demo{"デモ保存は実作品の取得を検証するものではありません。"}else{"拒否応答では新規要求を停止します。有限予算に到達した場合は進行中の正常な保存を確定します。"})
+            tr_format!(app.language, "{}\n\nSelection: {}\nOutput: {}\nSave mode: {}\nWorkers: {}\nPacing: {}\nRequest budget: {} (F10 to change)\n\n{}\n\nEnter: Start saving    Esc: Back", "{}\n\n対象: {}\n保存先: {}\n保存方式: {}\n並行保存: {}作品\n通信: {}\n要求予算: {}（F10で変更）\n\n{}\n\nEnter: 保存開始    Esc: 入力へ戻る",if app.demo{app.language.text("Saving synthetic data · Offline", "合成データを保存します · 通信なし")}else{app.language.text("Connecting to Pixiv anonymously", "Pixivへ匿名で接続します")},if let Some(scope) = &app.confirm_scope { scope.clone() } else if app.confirm_resume { app.language.text("Resume the latest saved selection (job / plan)", "最新の保存対象一覧から再開（job / plan）").into() }else{tr_format!(app.language, "{} inputs (author/search URLs expand to work lists)", "入力{}件（作者・タグ検索URLは作品一覧へ展開）",app.urls.value.split_whitespace().count())},clean(&app.out.value),if app.text_only { app.language.text("Text-only TXT (novel/novel_ID.txt)", "本文のみ TXT（novel/novel_ID.txt）") } else { app.language.text("Standard archive", "標準アーカイブ") },app.jobs,profile_label(app.language, app.balanced, app.interval, app.api_interval),budget_label(app.request_budget),if app.demo{app.language.text("Demo saves do not verify real Pixiv downloads.", "デモ保存は実作品の取得を検証するものではありません。")}else{app.language.text("Refusal responses stop new requests. At a finite budget, valid active saves finish.", "拒否応答では新規要求を停止します。有限予算に到達した場合は進行中の正常な保存を確定します。")})
         };
         frame.render_widget(
             Paragraph::new(text)
                 .wrap(Wrap { trim: false })
-                .scroll((
-                    if matches!(app.modal, Modal::Result | Modal::Collection) {
-                        app.modal_scroll
-                    } else {
-                        0
-                    },
-                    0,
-                ))
+                .scroll((app.modal_scroll, 0))
                 .style(Style::default().fg(INK).bg(BG))
                 .block(panel(
                     if app.modal == Modal::Help {
                         "HELP"
                     } else if app.modal == Modal::Collection {
-                        "画像・小説の集約"
+                        app.language
+                            .text("Image / novel collection", "画像・小説の集約")
                     } else if app.modal == Modal::Update {
-                        "アップデート"
+                        app.language.text("Update", "アップデート")
                     } else if app.modal == Modal::Result {
-                        "結果 / 欠損 · ↑↓ / PgUp PgDn · Escで閉じる"
+                        app.language.text(
+                            "Results / missing · ↑↓ / PgUp PgDn · Esc: Close",
+                            "結果 / 欠損 · ↑↓ / PgUp PgDn · Escで閉じる",
+                        )
                     } else {
-                        "保存内容の確認"
+                        app.language.text("Confirm save", "保存内容の確認")
                     },
                     true,
                 )),
@@ -2338,13 +2691,17 @@ pub fn run(automatic_updates: bool) -> Result<()> {
     let no_color = std::env::var_os("NO_COLOR").is_some();
     let mut terminal = ratatui::init();
     // Ratatui's panic hook restores terminal state; the ordinary path also disables paste.
-    let result = (|| -> Result<bool> {
+    let result = (|| -> Result<(bool, Language)> {
         let _input_modes = InputModes;
         execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
         let mut app = App::default();
         match settings::path() {
             Ok(path) => app.load_preferences(path),
-            Err(error) => app.log(format!("設定を記憶できません: {error}")),
+            Err(error) => app.log(tr_format!(
+                app.language,
+                "Cannot remember settings: {error}",
+                "設定を記憶できません: {error}"
+            )),
         }
         app.automatic_updates = automatic_updates;
         if automatic_updates {
@@ -2385,11 +2742,12 @@ pub fn run(automatic_updates: bool) -> Result<()> {
             let _ = w.handle.join();
         }
         app.save_preferences(&app.preferences(), false)?;
-        Ok(app.show_update_command)
+        Ok((app.show_update_command, app.language))
     })();
     ratatui::restore();
-    if result? {
-        update::print_instructions();
+    let (show_update_command, language) = result?;
+    if show_update_command {
+        update::print_instructions(language);
     }
     Ok(())
 }
@@ -2410,6 +2768,14 @@ impl Drop for App {
 
 #[cfg(test)]
 mod tests {
+    fn japanese_app() -> App {
+        let mut app = App::default();
+        app.language = Language::Japanese;
+        app.settings_language = Language::Japanese;
+        app.logs = welcome(Language::Japanese);
+        app
+    }
+
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
     fn screen_text(terminal: &Terminal<TestBackend>) -> String {
@@ -2428,8 +2794,137 @@ mod tests {
         output
     }
     #[test]
-    fn settings_validate_budget_and_apply_only_on_enter() {
+    fn english_default_and_f10_language_survive_restart_and_cancel() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
         let mut app = App::default();
+        app.load_preferences(path.clone());
+        assert_eq!(app.language, Language::English);
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|frame| draw(frame, &app, false)).unwrap();
+        let text = screen_text(&terminal);
+        assert!(text.contains("[F10 Settings]"));
+        assert!(text.contains("One URL per line"));
+        assert!(!text.contains("保存先"));
+
+        app.key(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.settings_focus, 6);
+        app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.language, Language::English);
+        terminal.draw(|frame| draw(frame, &app, false)).unwrap();
+        assert!(screen_text(&terminal).contains("Language: 日本語"));
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(Settings::load(&path).unwrap().language, Language::Japanese);
+
+        let mut restarted = App::default();
+        restarted.load_preferences(path.clone());
+        assert_eq!(restarted.language, Language::Japanese);
+        assert!(restarted.logs.back().unwrap().contains("貼り付け"));
+        restarted.open_settings();
+        restarted.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        restarted.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        restarted.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(restarted.language, Language::Japanese);
+        assert_eq!(Settings::load(&path).unwrap().language, Language::Japanese);
+
+        restarted.open_settings();
+        restarted.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        restarted.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        restarted.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(restarted.settings_focus, 0);
+        restarted.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut english_again = App::default();
+        english_again.load_preferences(path);
+        assert_eq!(english_again.language, Language::English);
+    }
+    #[test]
+    fn language_mouse_controls_and_dialogs_work_at_small_sizes() {
+        for language in [Language::English, Language::Japanese] {
+            for (width, height) in [(40, 18), (80, 24), (120, 36)] {
+                let mut app = App::default();
+                app.language = language;
+                app.urls = Editor::new("https://www.pixiv.net/tags/獣人/novels?work_lang=ja&r=1");
+                let area = Rect::new(0, 0, width, height);
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                app.open_settings();
+                let popup = popup_rect(View::new(area).unwrap().body, &app.modal);
+                let selector = text_settings_controls(popup)[2];
+                assert!(selector.height > 0 && selector.width > 0);
+                app.mouse(
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: selector.x,
+                        row: selector.y,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    area,
+                );
+                assert_eq!(app.settings_focus, 6);
+                assert_eq!(app.settings_language, language.toggle());
+                let (_, _, _, _, apply) = settings_controls(language, popup);
+                assert!(apply.height > 0 && apply.width > 0);
+                app.mouse(
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: apply.x,
+                        row: apply.y,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    area,
+                );
+                assert_eq!(app.language, language.toggle());
+                for modal in [
+                    Modal::None,
+                    Modal::Settings,
+                    Modal::Help,
+                    Modal::Confirm,
+                    Modal::Update,
+                    Modal::Collection,
+                    Modal::Result,
+                ] {
+                    app.modal = modal;
+                    terminal.draw(|frame| draw(frame, &app, false)).unwrap();
+                }
+                assert_eq!(
+                    app.urls.value,
+                    "https://www.pixiv.net/tags/獣人/novels?work_lang=ja&r=1"
+                );
+            }
+        }
+    }
+    #[test]
+    fn default_english_progress_result_and_confirmation_are_localized() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::default();
+        app.demo = true;
+        app.urls = Editor::new("user:9001");
+        app.out = Editor::new(temp.path().join("archive").to_str().unwrap());
+        app.start("plan");
+        finish(&mut app);
+        assert!(app
+            .logs
+            .iter()
+            .any(|line| line.contains("Checking selected works")));
+        assert!(app.logs.iter().any(|line| line.contains("Estimated")));
+        assert!(app.summary().contains("Result: PLANNED"));
+        assert!(!app.logs.iter().any(|line| line.contains("対象")));
+        app.confirm_save(false);
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|frame| draw(frame, &app, false)).unwrap();
+        assert!(screen_text(&terminal).contains("Confirm save"));
+        assert!(screen_text(&terminal).contains("Request budget:"));
+        app.modal = Modal::Help;
+        app.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.modal_scroll, 5);
+        app.language = Language::Japanese;
+        assert!(app.summary().contains("結果: PLANNED"));
+        assert_eq!(row_status(app.language, "body_ready"), "本文保存済み");
+        assert_eq!(row_status(Language::English, "body_ready"), "Text saved");
+    }
+    #[test]
+    fn settings_validate_budget_and_apply_only_on_enter() {
+        let mut app = japanese_app();
         assert_eq!(app.request_budget, 20_000);
         assert!(app.balanced);
         app.key(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE));
@@ -2468,7 +2963,7 @@ mod tests {
     fn f10_zero_budget_persists_and_shows_infinity_in_confirm_progress_and_result() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("settings.json");
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.load_preferences(path.clone());
         app.key(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -2478,7 +2973,7 @@ mod tests {
         assert!(app.modal == Modal::None);
         assert_eq!(app.request_budget, 0);
         assert_eq!(Settings::load(&path).unwrap().request_budget, 0);
-        let mut restarted = App::default();
+        let mut restarted = japanese_app();
         restarted.load_preferences(path);
         restarted.urls = Editor::new("novel:1004");
         assert_eq!(restarted.options().unwrap().request_budget, 0);
@@ -2498,7 +2993,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("settings.json");
         let out = temp.path().join("saved-archive");
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.load_preferences(path.clone());
         app.out = Editor::new(&out.to_string_lossy());
         app.urls = Editor::new("novel:1004");
@@ -2522,7 +3017,7 @@ mod tests {
         assert!(!app.text_only);
         app.settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.modal == Modal::None);
-        let mut restarted = App::default();
+        let mut restarted = japanese_app();
         restarted.load_preferences(path.clone());
         assert_eq!(restarted.jobs, MAX_JOBS);
         assert_eq!(restarted.interval, MIN_REQUEST_INTERVAL);
@@ -2546,7 +3041,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("not-a-directory");
         std::fs::write(&path, "file").unwrap();
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.settings_path = Some(path.join("settings.json"));
         app.open_settings();
         app.settings_jobs = 8;
@@ -2560,7 +3055,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("settings.json");
         std::fs::write(&path, "{broken").unwrap();
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.load_preferences(path.clone());
         assert!(app.save_preferences(&app.preferences(), false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
@@ -2575,7 +3070,7 @@ mod tests {
         let out = temp.path().join("archive");
         std::fs::create_dir_all(out.join("novel")).unwrap();
         std::fs::write(out.join("novel/novel_1004.txt"), "既存本文").unwrap();
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.demo = true;
         app.out = Editor::new(out.to_str().unwrap());
         app.urls = Editor::new("https://www.pixiv.net/novel/show.php?id=1004");
@@ -2617,7 +3112,7 @@ mod tests {
     }
     #[test]
     fn custom_intervals_are_validated_before_settings_are_applied() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.open_settings();
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -2643,11 +3138,11 @@ mod tests {
     #[test]
     fn settings_mouse_and_small_screen_keep_controls_available() {
         for (width, height) in [(40, 18), (80, 24), (120, 36)] {
-            let mut app = App::default();
+            let mut app = japanese_app();
             app.open_settings();
             let area = Rect::new(0, 0, width, height);
             let popup = popup_rect(View::new(area).unwrap().body, &app.modal);
-            let (_, balanced, _, presets, apply) = settings_controls(popup);
+            let (_, balanced, _, presets, apply) = settings_controls(Language::Japanese, popup);
             for (i, rect) in interval_controls(popup).iter().enumerate() {
                 assert!(rect.height >= 3 && rect.width > 0);
                 app.mouse(
@@ -2684,7 +3179,7 @@ mod tests {
     }
     #[test]
     fn resume_does_not_require_urls_and_confirmation_keeps_settings_visible() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.balanced = true;
         app.request_budget = 20_000;
         assert!(app.options().is_err());
@@ -2704,7 +3199,7 @@ mod tests {
     }
     #[test]
     fn body_ready_is_not_full_completion_and_thousands_of_rows_keep_selection() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         for id in 1..=4332 {
             app.set_row(format!("novel_{id}"), "assets_pending".into());
         }
@@ -2748,7 +3243,7 @@ mod tests {
     }
     #[test]
     fn failed_search_shows_reason_and_correct_discovery_resume_hint() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         let (sender, receiver) = mpsc::channel();
         app.worker = Some(Worker {
             receiver,
@@ -2767,7 +3262,7 @@ mod tests {
     }
     #[test]
     fn planned_author_list_keeps_all_four_thousand_targets() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         let (sender, receiver) = mpsc::channel();
         app.worker = Some(Worker {
             receiver,
@@ -2787,7 +3282,7 @@ mod tests {
     fn collection_dialog_backfills_missing_text_offline_and_keeps_work_rows() {
         let temp = tempfile::tempdir().unwrap();
         let out = temp.path().join("集約テスト");
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.demo = true;
         app.urls = Editor::new("user:9001");
         app.out = Editor::new(out.to_str().unwrap());
@@ -2822,7 +3317,7 @@ mod tests {
     }
     #[test]
     fn asynchronous_update_notification_is_visible_without_blocking_input() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         let (sender, receiver) = mpsc::channel();
         app.update_receiver = Some(receiver);
         app.update_status = update::Status::Checking;
@@ -2860,7 +3355,7 @@ mod tests {
     }
     #[test]
     fn update_dialog_does_not_exit_or_cancel_active_downloads() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         let (_sender, receiver) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         app.worker = Some(Worker {
@@ -2880,7 +3375,7 @@ mod tests {
     #[test]
     fn update_failure_and_dialog_render_at_small_widths_and_support_clicks() {
         for (w, h) in [(40, 18), (80, 24), (120, 36)] {
-            let mut app = App::default();
+            let mut app = japanese_app();
             let (sender, receiver) = mpsc::channel();
             app.update_receiver = Some(receiver);
             sender.send(Err("接続できません".into())).unwrap();
@@ -2928,7 +3423,7 @@ mod tests {
     #[test]
     fn responsive_draws_and_confirmation() {
         for (w, h) in [(24, 8), (40, 18), (80, 24), (120, 36), (160, 45)] {
-            let mut app = App::default();
+            let mut app = japanese_app();
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
             t.draw(|f| draw(f, &app, false)).unwrap();
             app.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
@@ -2955,7 +3450,7 @@ mod tests {
     }
     #[test]
     fn pasted_novel_search_links_with_browser_parameters_open_confirmation() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.urls.insert("https://www.pixiv.net/tags/%E7%8D%A3%E4%BA%BA/novels?p=2&work_lang=ja&r=1\nhttps://www.pixiv.net/tags/test/novels?work_lang=ja&r=1\nhttps://www.pixiv.net/tags/test\nhttps://www.pixiv.net/search?q=R18&s_mode=tag_tc&type=novel\nhttps://www.pixiv.net/tags/%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB/novels\n", true);
         let options = app.options().unwrap();
         assert_eq!(options.targets.len(), 5);
@@ -2979,7 +3474,7 @@ mod tests {
             |_| {},
         )
         .unwrap();
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.text_only = true;
         app.demo = true;
         app.out = Editor::new(&out.to_string_lossy());
@@ -3000,7 +3495,7 @@ mod tests {
     }
     #[test]
     fn pasted_sixteen_urls_validate_and_keep_job_bound() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.urls.insert(
             &(1..=16)
                 .map(|i| format!("https://www.pixiv.net/artworks/{i}"))
@@ -3019,7 +3514,7 @@ mod tests {
     }
     #[test]
     fn demo_switch_keeps_online_urls_and_destination() {
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.urls = Editor::new("art:123\nnovel:456");
         app.out = Editor::new("D:/My archive");
         app.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
@@ -3043,7 +3538,7 @@ mod tests {
     fn saved_and_resumed_rows_keep_actual_paths_after_settings_change_and_verify() {
         let temp = tempfile::tempdir().unwrap();
         let out = temp.path().join("保存先 空白");
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.demo = true;
         app.urls = Editor::new("user:9001");
         app.out = Editor::new(out.to_str().unwrap());
@@ -3090,7 +3585,7 @@ mod tests {
     #[test]
     fn mouse_row_selection_and_folder_buttons_use_same_layout_as_render() {
         let temp = tempfile::tempdir().unwrap();
-        let mut app = App::default();
+        let mut app = japanese_app();
         app.out = Editor::new(temp.path().join("missing").to_str().unwrap());
         for i in 1..=12 {
             app.set_row(format!("art_{i}"), "planned".into());
@@ -3111,7 +3606,7 @@ mod tests {
         assert_eq!(app.focus, 3);
         app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.selected, 2);
-        let (root, work) = buttons(view.footer);
+        let (root, work) = buttons(Language::Japanese, view.footer);
         app.mouse(
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),

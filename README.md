@@ -2,6 +2,10 @@
 
 **Rust + Ratatui** のローカル保存ツールです。大きな立体文字のロゴから起動し、作品・作者・小説シリーズのURLをまとめて入力できます。Windowsを優先して開発しています。
 
+**v0.3.0-alpha.1 uses English by default.** To switch to Japanese, press **F10**, move to **Language** with Tab, choose **日本語** with ← / →, then press **Enter**. Your language and other settings are remembered after restarting. Press Esc to discard changes.
+
+**初期言語は英語です。** 日本語にするには **F10 → Tabで「Language」へ → ← / → で「日本語」→ Enter**。言語・保存先・並列数などの設定は再起動後も引き継ぎます。Escで変更を取り消せます。
+
 ![保存結果と保存先を開くボタン](docs/images/ratatui-output-paths.png)
 
 *合成4作品の保存後。実際のLinux端末出力を120桁×36行で取得し、レンダリングした表示例です。Windows実機のスクリーンショットではありません。*
@@ -19,7 +23,7 @@ opixiv
 
 alpha.6以降の更新は **`opixiv update`** で行えます。以前の版を使用中なら、今回だけ上のCargoコマンドで更新してください。作業フォルダーの移動や `git pull` は不要です。リポジトリから開発・試用する場合は、cloneしたフォルダー内で `cargo run --release --locked` を使えます。Rust版の実行にPythonは必要ありません。デモ用データも実行ファイルに組み込まれています。
 
-以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.2.0-alpha.9` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
+以前Python版の `opixiv` をインストールしていた場合は `opixiv --version` を確認してください。新しいRust版は `opixiv 0.3.0-alpha.1` です。古いコマンドが優先される場合は、PowerShellで `& "$env:USERPROFILE\.cargo\bin\opixiv.exe"` と直接起動できます。
 
 ## 操作
 
@@ -41,7 +45,7 @@ URL欄へ1行に1URLを貼り付け、Tabで保存先・並行数へ移動しま
 | ↑ / ↓、PgUp / PgDn | 一覧で作品を選択。Enterでそのフォルダーを開く |
 | F6 / F7 | 保存先／選択した作品のフォルダーを開く。画面下のボタンもクリック可能 |
 | F8 / F9 | 最新版を再確認／更新方法を開く。ロゴ下のボタンもクリック可能 |
-| F10 | 保存モード・並列数・全体/APIの開始間隔・要求予算を変更し、再起動後も記憶 |
+| F10 | 保存モード・並列数・全体/APIの開始間隔・要求予算・言語を変更し、再起動後も記憶 |
 | F11 / Ctrl+R | 保存先にある最新の対象一覧から再開。URLの再入力や作者一覧の再取得は不要 |
 | F1 | ヘルプ |
 | Esc / Ctrl+C | 実行中は停止を要求し、処理終了を待つ。待機中は終了 |

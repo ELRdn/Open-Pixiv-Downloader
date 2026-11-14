@@ -20,7 +20,7 @@ const SOURCE: &str = "https://www.pixiv.net/novel";
 const CHECKPOINT: &str = "novel-scan.json";
 const BATCH: u64 = 1000;
 
-pub fn describe_selection(options: &Options) -> Result<Option<String>> {
+pub fn describe_selection(options: &Options) -> Result<Option<crate::i18n::Message>> {
     let scan = if options.resume {
         owns_selection(&options.out)?
     } else {
@@ -32,7 +32,8 @@ pub fn describe_selection(options: &Options) -> Result<Option<String>> {
         return Ok(None);
     }
     let state = read_state(&safe_path(&options.out, CHECKPOINT)?, options.online)?;
-    Ok(Some(format!(
+    Ok(Some(message!(
+        "Fixed IDs {}..{} ({} IDs remaining, not a work count)",
         "固定ID {}〜{}（残り {} ID・作品数ではありません）",
         state.first_id,
         state.last_id,
@@ -382,7 +383,8 @@ fn run_inner(
             }
             .into();
             state.save(&root)?;
-            emit(Event::Message(format!(
+            emit(Event::Message(message!(
+                "ID range checked: {} / {} (saved, excluded, and unavailable included)",
                 "ID範囲の確認: {} / {}（保存・除外・取得不可を含む）",
                 state.processed(),
                 state.total()
@@ -450,6 +452,7 @@ mod tests {
         })
         .unwrap()
         .unwrap()
+        .render(crate::i18n::Language::Japanese)
         .contains("1004〜1006"));
     }
 

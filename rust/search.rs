@@ -184,7 +184,7 @@ pub fn discover_with(
     source: &str,
     types: &str,
     mut fetch: impl FnMut(&str, &[(&str, String)], Option<&str>) -> Result<Value>,
-    mut progress: impl FnMut(String),
+    mut progress: impl FnMut(crate::i18n::Message),
 ) -> Result<Vec<Target>> {
     let url = normalize(&Url::parse(source).map_err(|_| invalid("Invalid search URL"))?)?;
     validate(&url)?;
@@ -431,13 +431,14 @@ pub fn discover_with(
                     }
                     page_size = page_size.max(span.len());
                     spans.push(span);
-                    progress(format!(
+                    progress(message!(
+                        "Listing: {} confirmed / Current range {}/{} · {}..{} · Page {page}",
                         "検索列挙: 確定 {}件 / 今の区間 {}/{}件 · {}〜{} · {page}ページ",
                         refs.len(),
                         found.len(),
                         expected,
-                        start.map_or_else(|| "開始指定なし".into(), |d| d.to_string()),
-                        end.map_or_else(|| "終了指定なし".into(), |d| d.to_string())
+                        start.map_or_else(|| "—".into(), |d| d.to_string()),
+                        end.map_or_else(|| "—".into(), |d| d.to_string())
                     ));
                     if found.len() as u64 > expected {
                         return Err(invalid("Tag-search total changed; run the search again"));
@@ -485,7 +486,8 @@ pub fn discover_with(
                 !complete && kind == "novel" && start == end && expected <= searched_slots as u64
             }) {
                 let known = range_seen.union(&seen).cloned().collect();
-                progress(format!(
+                progress(message!(
+                    "Crowded day {day}: Recovering {} missing works from nearby IDs",
                     "密集日 {day}: 不足 {}件を周辺IDから補完中",
                     expected as usize - found.len()
                 ));
@@ -501,7 +503,10 @@ pub fn discover_with(
                         let body = fetch(path, query, node)?;
                         checked += 1;
                         if checked.is_multiple_of(100) {
-                            progress(format!("密集日 {day}: ID補完で{checked}件を確認"));
+                            progress(message!(
+                                "Crowded day {day}: Checked {checked} IDs for recovery",
+                                "密集日 {day}: ID補完で{checked}件を確認"
+                            ));
                         }
                         Ok(body)
                     },
@@ -526,7 +531,8 @@ pub fn discover_with(
             if complete {
                 if let Some(day) = start.filter(|_| start == end) {
                     if !gaps.is_empty() {
-                        progress(format!(
+                        progress(message!(
+                            "Crowded day {day}: {}/{} works after ID recovery",
                             "密集日 {day}: ID補完後 {}/{}件",
                             found.len(),
                             expected
@@ -572,7 +578,8 @@ pub fn discover_with(
                     expected,
                     &mut fetch,
                 )? {
-                    progress(format!(
+                    progress(message!(
+                        "Crowded day {first}: Splitting {expected} works by keyword (original filters retained)",
                         "密集日 {first}: {expected}件を検索語で分割（元の条件を保持）"
                     ));
                     pending.push(RangeTask::Verify {
@@ -611,7 +618,8 @@ pub fn discover_with(
             } else {
                 pending.extend([left, right]);
             }
-            progress(format!(
+            progress(message!(
+                "Search page range is incomplete; splitting dates: Through {split} / From {next}",
                 "検索のページ範囲で未達のため日付分割: {split}以前 / {next}以降"
             ));
         }

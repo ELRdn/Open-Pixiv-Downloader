@@ -15,7 +15,7 @@ impl Archive {
     pub(super) fn text_path(&self, target: &Target) -> Result<PathBuf> {
         if target.kind != "novel" {
             return Err(invalid(
-                "本文のみモードは小説専用です。小説URLを指定してください。",
+                "Text-only mode supports novels only. Supply a novel URL.",
             ));
         }
         safe_path(&self.root, &format!("novel/{}.txt", target.key()))
@@ -123,7 +123,7 @@ impl Archive {
             if bytes < self.min_text_bytes {
                 return self.skip_short_text(target, bytes);
             }
-            return Err(invalid("既存の本文TXTが空・不正・変更済みです。上書きせず保持しました。別の場所へ移してから再開してください。"));
+            return Err(invalid("Existing body TXT is empty, invalid, or modified. It was preserved; move it elsewhere before resuming."));
         }
         let mut local = None;
         if let Some(manifest) = self.manifest(target).filter(|m| m["key"] == target.key()) {

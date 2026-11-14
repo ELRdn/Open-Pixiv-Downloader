@@ -6,6 +6,9 @@ mod archive;
 mod collection;
 #[path = "../rust/error.rs"]
 mod error;
+#[macro_use]
+#[path = "../rust/i18n.rs"]
+mod i18n;
 #[path = "../rust/jobs.rs"]
 mod jobs;
 #[path = "../rust/media.rs"]

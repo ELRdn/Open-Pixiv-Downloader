@@ -67,7 +67,7 @@ impl Default for Options {
 }
 #[derive(Clone, Debug)]
 pub enum Event {
-    Message(String),
+    Message(crate::i18n::Message),
     BodyReady {
         key: String,
     },
@@ -175,7 +175,9 @@ fn resume_targets(options: &Options) -> Result<SavedSelection> {
     }
     let complete = v["discovery_complete"] == true;
     if v["text_only"] == true && !options.text_only {
-        return Err(invalid("本文専用の保存対象です。F10で「本文のみ」を選ぶか --text-only を付けて再開してください。"));
+        return Err(invalid(
+            "This selection is text-only. Choose Text-only in F10 or resume with --text-only.",
+        ));
     }
     if !complete && (v["discovery_complete"] != false || v["discovery_resumable"] != true) {
         return Err(invalid("Saved selection is incomplete; run the source URLs again instead of resuming an older job"));
@@ -302,13 +304,13 @@ pub fn run(
     };
     if options.text_only && input.iter().any(|target| target.kind == "art") {
         return Err(invalid(
-            "本文のみモードは小説専用です。小説・作者・タグURLを指定してください。",
+            "Text-only mode supports novels only. Supply a novel, author, or search URL.",
         ));
     }
     if input.iter().any(|target| target.kind == "novel_scan") {
         if input.len() != 1 || !options.text_only {
             return Err(invalid(
-                "小説トップのID走査は単独URL・本文のみで実行してください。",
+                "Run a novel-top ID scan with a single URL in text-only mode.",
             ));
         }
         if plan {
@@ -348,7 +350,7 @@ pub fn run(
     if options.resume && !options.novel_scan && crate::novel_scan::owns_selection(&archive.root)? {
         if !options.text_only {
             return Err(invalid(
-                "小説のID走査はF10の本文のみ、または --text-only で再開してください。",
+                "Resume the novel ID scan with Text-only in F10 or --text-only.",
             ));
         }
         drop(archive);
@@ -395,16 +397,19 @@ pub fn run(
     report["previous_exclusions"] = json!(0);
     report["deferred_by_limit"] = json!(0);
     let mut collected = collection::Report::default();
-    emit(Event::Message(
-        if options.resume && !discovery_complete {
+    emit(Event::Message(if options.resume && !discovery_complete {
+        message!(
+            "Continuing discovery from cached search pages.",
             "保存済みの列挙結果を再利用して、対象一覧の列挙を続けます。"
-        } else if options.resume {
+        )
+    } else if options.resume {
+        message!(
+            "Resuming the saved selection without listing authors again.",
             "保存した対象一覧から再開します。作者一覧は再取得しません。"
-        } else {
-            "対象作品を確認しています…"
-        }
-        .into(),
-    ));
+        )
+    } else {
+        message!("Checking selected works…", "対象作品を確認しています…")
+    }));
     let action = (|| -> Result<()> {
         // Supersede old work immediately. A failed new discovery must never
         // silently resume an unrelated old job or plan.
@@ -545,17 +550,18 @@ pub fn run(
             deferred,
             excluded,
         });
-        emit(Event::Message(format!(
-            "対象 {} / 要求予算 {} / {}の概算 {} 要求",
-            selected.len(),
-            options.request_budget,
-            if options.text_only {
-                "本文のみ"
-            } else {
-                "本文・表紙（挿絵・多ページは追加）"
-            },
-            report["estimated_typical_requests_remaining"]
-        )));
+        let estimate = report["estimated_typical_requests_remaining"].to_string();
+        let selected_count = selected.len();
+        let budget = if options.request_budget == 0 {
+            "∞".into()
+        } else {
+            options.request_budget.to_string()
+        };
+        emit(Event::Message(if options.text_only {
+            message!("Selected {selected_count} / Budget {budget} / Estimated {estimate} text-only requests", "対象 {selected_count} / 要求予算 {budget} / 本文のみの概算 {estimate} 要求")
+        } else {
+            message!("Selected {selected_count} / Budget {budget} / Estimated {estimate} text/cover requests (inserted images and extra pages add requests)", "対象 {selected_count} / 要求予算 {budget} / 本文・表紙の概算 {estimate} 要求（挿絵・多ページは追加）")
+        }));
         if plan {
             report["selected_targets"] =
                 json!(selected.iter().map(Target::label).collect::<Vec<_>>());

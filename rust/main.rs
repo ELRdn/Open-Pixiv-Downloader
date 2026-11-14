@@ -2,6 +2,8 @@ mod archive;
 mod collection;
 mod error;
 mod folder;
+#[macro_use]
+mod i18n;
 mod jobs;
 mod media;
 mod novel;
