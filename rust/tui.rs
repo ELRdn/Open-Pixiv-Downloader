@@ -340,6 +340,7 @@ struct App {
     settings_focus: usize,
     settings_error: Option<String>,
     confirm_resume: bool,
+    confirm_scope: Option<String>,
     dirty: bool,
     focus: usize,
     demo: bool,
@@ -391,6 +392,7 @@ impl Default for App {
             settings_focus: 0,
             settings_error: None,
             confirm_resume: false,
+            confirm_scope: None,
             dirty: true,
             focus: 0,
             demo: false,
@@ -541,7 +543,7 @@ impl App {
             return;
         };
         match self.settings_budget.value.parse::<usize>() {
-            Ok(value) if (1..=MAX_REQUEST_BUDGET).contains(&value) => {
+            Ok(value) if value <= MAX_REQUEST_BUDGET => {
                 let mut settings = self.preferences();
                 settings.request_budget = value;
                 settings.balanced = self.settings_balanced;
@@ -568,13 +570,14 @@ impl App {
                 self.api_interval = api_interval;
                 self.modal = Modal::None;
                 self.log(format!(
-                    "設定: {} / 要求予算 {}回",
+                    "設定: {} / 要求予算 {}",
                     profile_label(self.balanced, self.interval, self.api_interval),
-                    self.request_budget
+                    budget_label(self.request_budget)
                 ));
             }
             _ => {
-                self.settings_error = Some("要求予算は1〜1000000の整数で入力してください。".into())
+                self.settings_error =
+                    Some("要求予算は0〜1000000の整数で入力してください（0＝∞）。".into())
             }
         }
     }
@@ -748,7 +751,7 @@ impl App {
             },
             self.complete,
             self.requests,
-            self.active_request_budget
+            budget_label(self.active_request_budget)
         )
     }
     fn telemetry_label(&self) -> String {
@@ -793,6 +796,14 @@ impl App {
             return "まだ結果はありません。".into();
         };
         let mut lines = vec![format!("結果: {}", self.status), "".into()];
+        if v["novel_scan"] == true {
+            lines.push(format!(
+                "固定したID範囲: {}〜{} / 確認済み {} / 残り {}",
+                v["first_id"], v["last_id"], v["processed_ids"], v["remaining_ids"]
+            ));
+            lines
+                .push("IDの確認件数です。新着一覧の終端やPixiv全作品の件数とは異なります。".into());
+        }
         if v.get("selected").is_some() {
             lines.push(format!(
                 "対象 {} / 保存済み {} / 未処理 {}",
@@ -823,7 +834,11 @@ impl App {
             ));
         }
         if let Some(budget) = v["request_budget"].as_u64() {
-            lines.push(format!("要求使用 {} / 上限 {budget}", v["requests"]));
+            lines.push(format!(
+                "要求使用 {} / 上限 {}",
+                v["requests"],
+                budget_label(budget as usize)
+            ));
         }
         if let Some(reason) = v.get("stop_reason").filter(|reason| !reason.is_null()) {
             lines.push(format!("停止理由: {}", stop_label(reason)));
@@ -931,6 +946,21 @@ impl App {
     }
     fn options(&self) -> Result<Options> {
         self.options_for(false)
+    }
+    fn confirm_save(&mut self, resume: bool) {
+        let options = if resume {
+            self.options_for(true)
+        } else {
+            self.options()
+        };
+        match options.and_then(|options| crate::novel_scan::describe_selection(&options)) {
+            Ok(scope) => {
+                self.confirm_scope = scope;
+                self.confirm_resume = resume;
+                self.modal = Modal::Confirm;
+            }
+            Err(error) => self.log(error.to_string()),
+        }
     }
     fn options_for(&self, resume: bool) -> Result<Options> {
         let values: Vec<_> = self
@@ -1301,13 +1331,7 @@ impl App {
             || (key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL)))
             && self.worker.is_none()
         {
-            match self.options_for(true) {
-                Ok(_) => {
-                    self.confirm_resume = true;
-                    self.modal = Modal::Confirm;
-                }
-                Err(e) => self.log(e.to_string()),
-            }
+            self.confirm_save(true);
             return false;
         }
         if key.code == KeyCode::F(1) {
@@ -1415,13 +1439,7 @@ impl App {
             }
             KeyCode::F(5) => self.start("plan"),
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                match self.options() {
-                    Ok(_) => {
-                        self.confirm_resume = false;
-                        self.modal = Modal::Confirm;
-                    }
-                    Err(e) => self.log(e.to_string()),
-                }
+                self.confirm_save(false);
             }
             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => self.start("verify"),
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::ALT) => self.start("pack"),
@@ -1721,6 +1739,13 @@ fn profile_label(balanced: bool, interval: f64, api_interval: f64) -> String {
         "互換: 全通信2秒間隔".into()
     }
 }
+fn budget_label(budget: usize) -> String {
+    if budget == 0 {
+        "∞".into()
+    } else {
+        budget.to_string()
+    }
+}
 fn stop_label(value: &Value) -> String {
     match value["kind"].as_str() {
         Some("user_cancel") => "ユーザー操作で停止".into(),
@@ -1910,7 +1935,7 @@ fn draw_settings(frame: &mut Frame, app: &App, popup: Rect) {
         frame,
         budget,
         &app.settings_budget,
-        "要求予算 · 1〜1000000回",
+        "要求予算 · 0=∞ / 1〜1000000回",
         app.settings_focus == 1,
         "",
     );
@@ -2277,7 +2302,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         } else if app.modal == Modal::Result {
             app.summary()
         } else {
-            format!("{}\n\n対象: {}\n保存先: {}\n保存方式: {}\n並行保存: {}作品\n通信: {}\n要求予算: {}回（F10で変更）\n\n{}\n\nEnter: 保存開始    Esc: 入力へ戻る",if app.demo{"合成データを保存します · 通信なし"}else{"Pixivへ匿名で接続します"},if app.confirm_resume { "最新の保存対象一覧から再開（job / plan）".into() }else{format!("入力{}件（作者・タグ検索URLは作品一覧へ展開）",app.urls.value.split_whitespace().count())},clean(&app.out.value),if app.text_only { "本文のみ TXT（novel/novel_ID.txt）" } else { "標準アーカイブ" },app.jobs,profile_label(app.balanced, app.interval, app.api_interval),app.request_budget,if app.demo{"デモ保存は実作品の取得を検証するものではありません。"}else{"拒否応答では新規要求を停止します。予算到達時は進行中の正常な保存を確定します。"})
+            format!("{}\n\n対象: {}\n保存先: {}\n保存方式: {}\n並行保存: {}作品\n通信: {}\n要求予算: {}（F10で変更）\n\n{}\n\nEnter: 保存開始    Esc: 入力へ戻る",if app.demo{"合成データを保存します · 通信なし"}else{"Pixivへ匿名で接続します"},if let Some(scope) = &app.confirm_scope { scope.clone() } else if app.confirm_resume { "最新の保存対象一覧から再開（job / plan）".into() }else{format!("入力{}件（作者・タグ検索URLは作品一覧へ展開）",app.urls.value.split_whitespace().count())},clean(&app.out.value),if app.text_only { "本文のみ TXT（novel/novel_ID.txt）" } else { "標準アーカイブ" },app.jobs,profile_label(app.balanced, app.interval, app.api_interval),budget_label(app.request_budget),if app.demo{"デモ保存は実作品の取得を検証するものではありません。"}else{"拒否応答では新規要求を停止します。有限予算に到達した場合は進行中の正常な保存を確定します。"})
         };
         frame.render_widget(
             Paragraph::new(text)
@@ -2415,7 +2440,7 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        app.key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.modal == Modal::Settings);
         assert!(app.settings_error.is_some());
@@ -2438,6 +2463,35 @@ mod tests {
         app.settings_budget = Editor::new("9");
         app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.request_budget, 5000);
+    }
+    #[test]
+    fn f10_zero_budget_persists_and_shows_infinity_in_confirm_progress_and_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let mut app = App::default();
+        app.load_preferences(path.clone());
+        app.key(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.modal == Modal::None);
+        assert_eq!(app.request_budget, 0);
+        assert_eq!(Settings::load(&path).unwrap().request_budget, 0);
+        let mut restarted = App::default();
+        restarted.load_preferences(path);
+        restarted.urls = Editor::new("novel:1004");
+        assert_eq!(restarted.options().unwrap().request_budget, 0);
+        assert!(restarted.progress_label().contains("/∞"));
+        restarted.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(restarted.modal == Modal::Confirm);
+        let mut terminal = Terminal::new(TestBackend::new(100, 35)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &restarted, false))
+            .unwrap();
+        assert!(screen_text(&terminal).contains("要求予算: ∞"));
+        restarted.last = Some(serde_json::json!({"requests":42,"request_budget":0}));
+        assert!(restarted.summary().contains("上限 ∞"));
     }
     #[test]
     fn f10_persists_parallel_mode_budget_and_output_across_restart() {
@@ -2902,11 +2956,46 @@ mod tests {
     #[test]
     fn pasted_novel_search_links_with_browser_parameters_open_confirmation() {
         let mut app = App::default();
-        app.urls.insert("https://www.pixiv.net/tags/%E7%8D%A3%E4%BA%BA/novels?p=2&work_lang=ja&r=1\nhttps://www.pixiv.net/tags/test/novels?work_lang=ja&r=1\nhttps://www.pixiv.net/tags/test\n", true);
+        app.urls.insert("https://www.pixiv.net/tags/%E7%8D%A3%E4%BA%BA/novels?p=2&work_lang=ja&r=1\nhttps://www.pixiv.net/tags/test/novels?work_lang=ja&r=1\nhttps://www.pixiv.net/tags/test\nhttps://www.pixiv.net/search?q=R18&s_mode=tag_tc&type=novel\nhttps://www.pixiv.net/tags/%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB/novels\n", true);
         let options = app.options().unwrap();
-        assert_eq!(options.targets.len(), 3);
+        assert_eq!(options.targets.len(), 5);
         app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert!(app.modal == Modal::Confirm);
+        assert!(app.worker.is_none());
+    }
+    #[test]
+    fn novel_top_paste_opens_confirmation_for_text_only_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("scan");
+        crate::novel_scan::run(
+            Options {
+                out: out.clone(),
+                demo: true,
+                ..Default::default()
+            },
+            None,
+            Some(29631368),
+            Arc::new(AtomicBool::new(true)),
+            |_| {},
+        )
+        .unwrap();
+        let mut app = App::default();
+        app.text_only = true;
+        app.demo = true;
+        app.out = Editor::new(&out.to_string_lossy());
+        app.urls = Editor::new("https://www.pixiv.net/novel");
+        assert_eq!(
+            app.options().unwrap().targets,
+            ["https://www.pixiv.net/novel"]
+        );
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(app.modal == Modal::Confirm);
+        assert!(app.confirm_scope.as_ref().unwrap().contains("29631368"));
+        assert!(app
+            .confirm_scope
+            .as_ref()
+            .unwrap()
+            .contains("作品数ではありません"));
         assert!(app.worker.is_none());
     }
     #[test]

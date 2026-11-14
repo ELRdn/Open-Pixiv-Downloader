@@ -41,13 +41,13 @@ impl Settings {
             || self.out.trim().is_empty()
             || self.out.contains('\0')
             || !(1..=MAX_JOBS).contains(&self.jobs)
-            || !(1..=MAX_REQUEST_BUDGET).contains(&self.request_budget)
+            || self.request_budget > MAX_REQUEST_BUDGET
             || ![self.interval, self.api_interval]
                 .iter()
                 .all(|n| n.is_finite() && (MIN_REQUEST_INTERVAL..=3600.0).contains(n))
         {
             return Err(invalid(
-                "設定が不正です（並列1〜32、要求予算1〜1000000、間隔0.001〜3600秒）。",
+                "設定が不正です（並列1〜32、要求予算0〜1000000・0は無制限、間隔0.001〜3600秒）。",
             ));
         }
         Ok(())
@@ -104,7 +104,9 @@ mod tests {
             Settings::load(&path).unwrap().request_budget,
             MAX_REQUEST_BUDGET
         );
-        settings.request_budget = MAX_REQUEST_BUDGET;
+        settings.request_budget = 0;
+        settings.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).unwrap().request_budget, 0);
         settings.jobs = MAX_JOBS + 1;
         assert!(settings.save(&path).is_err());
         settings.jobs = MAX_JOBS;

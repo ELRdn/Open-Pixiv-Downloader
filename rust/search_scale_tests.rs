@@ -19,6 +19,7 @@ struct CappedSearch {
     ignore_dates: bool,
     step_days: i64,
     clamp_year: bool,
+    page_size: usize,
     calls: Mutex<Vec<Call>>,
 }
 
@@ -39,6 +40,7 @@ impl CappedSearch {
             ignore_dates: false,
             step_days: 1,
             clamp_year: false,
+            page_size: 30,
             calls: Mutex::default(),
         }
     }
@@ -114,9 +116,9 @@ impl Transport for CappedSearch {
             )
         };
         let total = hi.saturating_sub(lo);
-        let offset = (page.min(10) - 1) * 30;
+        let offset = (page.min(10) - 1) * self.page_size;
         let ascending = parameter("order") == Some("date");
-        let data: Vec<_> = (offset..(offset + 30).min(total))
+        let data: Vec<_> = (offset..(offset + self.page_size).min(total))
             .map(|position| {
                 let index = if ascending {
                     lo + position
@@ -130,7 +132,7 @@ impl Transport for CappedSearch {
             })
             .collect();
         Ok(json!({"novel": {
-            "data": data, "total": total, "lastPage": total.div_ceil(30).min(10)
+            "data": data, "total": total, "lastPage": total.div_ceil(self.page_size).min(10)
         }}))
     }
 
@@ -209,6 +211,22 @@ fn capped_search_enumerates_524_163727_and_164000_ids_exactly_once() {
         let partitions: HashSet<_> = calls.iter().map(|call| (call.start, call.end)).collect();
         assert!(partitions.len() > if total == 524 { 1 } else { 10 });
     }
+}
+
+#[test]
+fn original_sized_search_over_a_million_still_splits_and_enumerates_every_id() {
+    let mut client = CappedSearch::new("2010-01-01", 1_512_674, 500);
+    // Larger fixture pages keep the million-ID regression test bounded in time.
+    client.page_size = 30_000;
+    let targets = discover(&client, SOURCE, "novel").unwrap();
+    assert_ids(&targets, 1..=client.total, "date_d");
+    client.assert_request_limits();
+    assert!(client
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| call.start.is_some()));
 }
 
 #[test]

@@ -10,11 +10,13 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
+
+pub const MAX_SELECTION_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -36,6 +38,7 @@ pub struct Options {
     pub balanced: bool,
     pub resume: bool,
     pub text_only: bool,
+    pub novel_scan: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -58,6 +61,7 @@ impl Default for Options {
             balanced: false,
             resume: false,
             text_only: false,
+            novel_scan: false,
         }
     }
 }
@@ -125,7 +129,7 @@ pub fn targets(options: &Options) -> Result<Vec<Target>> {
 /// A target snapshot is separate from per-work checkpoints: a crash cannot erase
 /// the remaining IDs, and a resume never silently refreshes an author's list.
 fn snapshot(options: &Options, refs: &[Target], source: &[String]) -> Value {
-    json!({"schema_version":1,"discovery_complete":true,"discovery_resumable":false,"created_at":now(),"mode":if options.online {"online"}else{"fixture"},"source_targets":source,"targets":refs.iter().map(Target::label).collect::<Vec<_>>(),"all":options.all,"limit":options.limit,"types":options.types,"jobs":options.jobs,"request_budget":options.request_budget,"balanced":options.balanced,"interval":options.interval,"api_interval":options.api_interval,"text_only":options.text_only})
+    json!({"schema_version":1,"discovery_complete":true,"discovery_resumable":false,"created_at":now(),"mode":if options.online {"online"}else{"fixture"},"source_targets":source,"targets":refs.iter().map(Target::label).collect::<Vec<_>>(),"all":options.all,"limit":options.limit,"types":options.types,"jobs":options.jobs,"request_budget":options.request_budget,"balanced":options.balanced,"interval":options.interval,"api_interval":options.api_interval,"text_only":options.text_only,"novel_scan":options.novel_scan})
 }
 #[derive(Debug)]
 struct SavedSelection {
@@ -140,6 +144,20 @@ struct PendingDiscovery {
     limit: usize,
     types: String,
 }
+pub(crate) fn selection_path(root: &Path) -> Result<PathBuf> {
+    let job = safe_path(root, "job.json")?;
+    let plan = safe_path(root, "plan.json")?;
+    Ok(
+        if plan.exists()
+            && (!job.exists()
+                || fs::metadata(&plan)?.modified()? > fs::metadata(&job)?.modified()?)
+        {
+            plan
+        } else {
+            job
+        },
+    )
+}
 fn resume_targets(options: &Options) -> Result<SavedSelection> {
     if !options.targets.is_empty() || options.input.is_some() {
         return Err(invalid(
@@ -147,17 +165,9 @@ fn resume_targets(options: &Options) -> Result<SavedSelection> {
         ));
     }
     let root = options.out.canonicalize()?;
-    let job = safe_path(&root, "job.json")?;
-    let plan = safe_path(&root, "plan.json")?;
-    let path = if plan.exists()
-        && (!job.exists() || fs::metadata(&plan)?.modified()? > fs::metadata(&job)?.modified()?)
-    {
-        plan
-    } else {
-        job
-    };
-    if fs::metadata(&path)?.len() > 64 * 1024 * 1024 {
-        return Err(invalid("Saved job exceeds 64 MiB"));
+    let path = selection_path(&root)?;
+    if fs::metadata(&path)?.len() > MAX_SELECTION_BYTES {
+        return Err(invalid("Saved job exceeds 512 MiB"));
     }
     let v: Value = serde_json::from_slice(&fs::read(path)?)?;
     if v["schema_version"] != 1 || v["mode"] != if options.online { "online" } else { "fixture" } {
@@ -174,7 +184,7 @@ fn resume_targets(options: &Options) -> Result<SavedSelection> {
         .as_array()
         .ok_or_else(|| invalid("Invalid saved targets"))?;
     if items.len() > MAX_WORKS {
-        return Err(invalid("Saved job exceeds 1000000 works"));
+        return Err(invalid(&format!("Saved job exceeds {MAX_WORKS} works")));
     }
     let refs = items
         .iter()
@@ -248,21 +258,15 @@ fn resume_targets(options: &Options) -> Result<SavedSelection> {
     })
 }
 
-pub fn run(
-    mut options: Options,
-    plan: bool,
-    stop: Arc<AtomicBool>,
-    emit: impl Fn(Event) + Sync,
-) -> Result<Value> {
-    let started = Instant::now();
+pub(crate) fn validate_options(options: &Options) -> Result<()> {
     if !(1..=MAX_JOBS).contains(&options.jobs)
         || !(1..=1000).contains(&options.limit)
         || !(1..=1024).contains(&options.max_file_mib)
-        || !(1..=MAX_REQUEST_BUDGET).contains(&options.request_budget)
+        || options.request_budget > MAX_REQUEST_BUDGET
         || !["all", "art", "novel"].contains(&options.types.as_str())
     {
         return Err(invalid(
-            "Use jobs 1–32, limit 1–1000, request budget 1–1000000, file size 1–1024 MiB",
+            "Use jobs 1–32, limit 1–1000, request budget 0–1000000 (0 = unlimited), file size 1–1024 MiB",
         ));
     }
     if usize::from(options.online)
@@ -274,6 +278,17 @@ pub fn run(
             "Choose exactly one of --online, --demo or --fixture",
         ));
     }
+    Ok(())
+}
+
+pub fn run(
+    mut options: Options,
+    plan: bool,
+    stop: Arc<AtomicBool>,
+    emit: impl Fn(Event) + Sync,
+) -> Result<Value> {
+    let started = Instant::now();
+    validate_options(&options)?;
     // Fresh input must be valid before creating an archive; saved input needs its lock.
     let mut input = if options.resume {
         if !options.targets.is_empty() || options.input.is_some() {
@@ -289,6 +304,20 @@ pub fn run(
         return Err(invalid(
             "本文のみモードは小説専用です。小説・作者・タグURLを指定してください。",
         ));
+    }
+    if input.iter().any(|target| target.kind == "novel_scan") {
+        if input.len() != 1 || !options.text_only {
+            return Err(invalid(
+                "小説トップのID走査は単独URL・本文のみで実行してください。",
+            ));
+        }
+        if plan {
+            return crate::novel_scan::preview(&options);
+        }
+        options.targets.clear();
+        options.input = None;
+        options.resume = true;
+        return crate::novel_scan::run(options, None, None, stop, emit);
     }
     let inner: Arc<dyn Transport> = if options.online {
         Arc::new(Online::with_profile(
@@ -316,6 +345,15 @@ pub fn run(
     let mut archive = Archive::open(&options.out, options.resume)?;
     archive.text_only = options.text_only;
     let archive = Arc::new(archive);
+    if options.resume && !options.novel_scan && crate::novel_scan::owns_selection(&archive.root)? {
+        if !options.text_only {
+            return Err(invalid(
+                "小説のID走査はF10の本文のみ、または --text-only で再開してください。",
+            ));
+        }
+        drop(archive);
+        return crate::novel_scan::run(options, None, None, stop, emit);
+    }
     let resumed = if options.resume {
         Some(resume_targets(&options)?)
     } else {
@@ -403,18 +441,18 @@ pub fn run(
                     if seen.insert(r.clone()) {
                         refs.push(r);
                         if refs.len() > MAX_WORKS {
-                            return Err(invalid(
-                                "Discovered more than 1000000 works; narrow selection",
-                            ));
+                            return Err(invalid(&format!(
+                                "Discovered more than {MAX_WORKS} works; narrow selection"
+                            )));
                         }
                     }
                 }
             }
         }
         if refs.len() > MAX_WORKS {
-            return Err(invalid(
-                "Discovered more than 1000000 works; narrow selection",
-            ));
+            return Err(invalid(&format!(
+                "Discovered more than {MAX_WORKS} works; narrow selection"
+            )));
         }
         if options.text_only {
             refs.retain(|target| target.kind == "novel");
@@ -471,8 +509,8 @@ pub fn run(
         });
         let record = snapshot(&options, &intended, &sources);
         let saved = serde_json::to_vec_pretty(&record)?;
-        if saved.len() > 64 * 1024 * 1024 {
-            return Err(invalid("Saved job exceeds 64 MiB"));
+        if saved.len() as u64 > MAX_SELECTION_BYTES {
+            return Err(invalid("Saved job exceeds 512 MiB"));
         }
         atomic(&selection_path, &saved)?;
         report["discovery_complete"] = json!(true);
@@ -1183,9 +1221,9 @@ mod tests {
         assert!(!temp.path().join("works").exists());
     }
     #[test]
-    fn selection_above_100000_is_saved_and_resumed_without_network() {
+    fn selection_above_a_million_and_64_mib_is_saved_and_resumed_without_network() {
         let temp = tempfile::tempdir().unwrap();
-        let refs = (1..=164_000)
+        let refs = (1..=1_512_674)
             .map(|id| Target::new("novel", &id.to_string()).unwrap())
             .collect::<Vec<_>>();
         let options = Options {
@@ -1200,22 +1238,27 @@ mod tests {
             &["https://www.pixiv.net/tags/test/novels".into()],
         );
         let path = temp.path().join("job.json");
-        atomic(&path, &serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+        let mut bytes = serde_json::to_vec_pretty(&record).unwrap();
+        bytes.resize(64 * 1024 * 1024 + 1, b' ');
+        atomic(&path, &bytes).unwrap();
+        drop(bytes);
+        drop(record);
         let saved = resume_targets(&options).unwrap();
         assert!(saved.pending.is_none());
-        assert_eq!(saved.refs.len(), 164_000);
+        assert_eq!(saved.refs.len(), 1_512_674);
         assert_eq!(saved.refs.first(), refs.first());
         assert_eq!(saved.refs.last(), refs.last());
+        assert!(!crate::novel_scan::owns_selection(temp.path()).unwrap());
         fs::OpenOptions::new()
             .write(true)
             .open(&path)
             .unwrap()
-            .set_len(64 * 1024 * 1024 + 1)
+            .set_len(MAX_SELECTION_BYTES + 1)
             .unwrap();
         assert!(resume_targets(&options)
             .unwrap_err()
             .to_string()
-            .contains("64 MiB"));
+            .contains("512 MiB"));
     }
     #[test]
     fn pending_discovery_rejects_malformed_scope_but_accepts_complete_legacy() {
@@ -1468,6 +1511,42 @@ mod tests {
         .unwrap();
         assert_eq!(fresh["requests"], 2);
         assert_eq!(fresh["selected_targets"], json!(["art:1002", "novel:1004"]));
+    }
+    #[test]
+    fn query_search_plan_fetch_and_resume_keep_source_and_body_only_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = "https://www.pixiv.net/search?q=R18&s_mode=tag_tc&type=novel";
+        let mut fixture: Value = serde_json::from_str(DEMO).unwrap();
+        fixture["responses"]
+            ["/ajax/search/novels/R18?word=R18&order=date_d&mode=safe&s_mode=s_tag&p=1"] =
+            json!({"novel":{"data":[{"id":"1004"}],"total":1}});
+        let fixture_path = temp.path().join("fixture.json");
+        fs::write(&fixture_path, fixture.to_string()).unwrap();
+        let options = Options {
+            targets: vec![source.into()],
+            fixture: Some(fixture_path),
+            out: temp.path().join("archive"),
+            text_only: true,
+            all: true,
+            ..Default::default()
+        };
+        let plan = run(options.clone(), true, Arc::default(), |_| {}).unwrap();
+        assert_eq!(plan["status"], "planned");
+        assert_eq!(plan["requests"], 1);
+        let resumed = Options {
+            targets: vec![],
+            resume: true,
+            ..options
+        };
+        let fetched = run(resumed.clone(), false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(fetched["status"], "complete");
+        assert_eq!(fetched["requests"], 1);
+        assert_eq!(fetched["targets"], json!([source]));
+        assert!(resumed.out.join("novel/novel_1004.txt").is_file());
+        assert!(!resumed.out.join("works").exists());
+        let again = run(resumed, false, Arc::default(), |_| {}).unwrap();
+        assert_eq!(again["requests"], 0);
+        assert_eq!(again["already_complete"], 1);
     }
     #[test]
     fn tag_search_plan_fetch_resume_and_incomplete_discovery() {

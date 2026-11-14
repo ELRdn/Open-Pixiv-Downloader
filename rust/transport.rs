@@ -99,11 +99,8 @@ impl Fixture {
         if data["synthetic"] != true
             || !data["responses"].is_object()
             || !data["assets"].is_object()
-            || budget == 0
         {
-            return Err(invalid(
-                "Expected a synthetic fixture and positive request budget",
-            ));
+            return Err(invalid("Expected a synthetic fixture"));
         }
         Ok(Self {
             data,
@@ -120,7 +117,7 @@ impl Fixture {
         }
         let mut current = self.count.load(Ordering::SeqCst);
         loop {
-            if current >= self.budget {
+            if self.budget != 0 && current >= self.budget {
                 return Err(Error::Budget);
             }
             match self.count.compare_exchange_weak(
@@ -171,12 +168,12 @@ impl Transport for Fixture {
         self.stop.store(true, Ordering::SeqCst);
     }
     fn exhausted(&self) -> bool {
-        self.requests() >= self.budget
+        self.budget != 0 && self.requests() >= self.budget
     }
     fn metrics(&self) -> Value {
         json!({"api":{"requests":self.api_count.load(Ordering::SeqCst)},
                "media":{"requests":self.media_count.load(Ordering::SeqCst)},
-               "request_budget":self.budget,"requests_remaining":self.budget.saturating_sub(self.requests())})
+               "request_budget":self.budget,"requests_remaining":(self.budget != 0).then(|| self.budget.saturating_sub(self.requests()))})
     }
 }
 
@@ -280,11 +277,11 @@ impl Online {
             || !(minimum..=3600.0).contains(&interval)
             || !api_interval.is_finite()
             || !(MIN_REQUEST_INTERVAL..=3600.0).contains(&api_interval)
-            || !(1..=MAX_REQUEST_BUDGET).contains(&budget)
+            || budget > MAX_REQUEST_BUDGET
             || max_bytes == 0
         {
             return Err(invalid(
-                "Use a valid profile interval and request budget 1–1000000",
+                "Use a valid profile interval and request budget 0–1000000 (0 = unlimited)",
             ));
         }
         let http = Http::builder()
@@ -356,7 +353,7 @@ impl Online {
                 Some(Error::Stop(
                     "Job stopped; completed works remain saved".into(),
                 ))
-            } else if gate.count >= self.budget {
+            } else if self.budget != 0 && gate.count >= self.budget {
                 Some(Error::Budget)
             } else {
                 None
@@ -681,14 +678,14 @@ impl Transport for Online {
         self.wake.notify_all();
     }
     fn exhausted(&self) -> bool {
-        self.requests() >= self.budget
+        self.budget != 0 && self.requests() >= self.budget
     }
     fn stop_reason(&self) -> Option<StopReason> {
         let gate = self.gate.lock().unwrap();
         gate.reason.clone().or_else(|| {
             if self.stopped() {
                 Some(StopReason::UserCancel)
-            } else if gate.count >= self.budget {
+            } else if self.budget != 0 && gate.count >= self.budget {
                 Some(StopReason::RequestBudget)
             } else {
                 None
@@ -700,7 +697,7 @@ impl Transport for Online {
     }
     fn metrics(&self) -> Value {
         let gate = self.gate.lock().unwrap();
-        let mut value = json!({"requests":gate.count,"request_budget":self.budget,"requests_remaining":self.budget.saturating_sub(gate.count),
+        let mut value = json!({"requests":gate.count,"request_budget":self.budget,"requests_remaining":(self.budget != 0).then(|| self.budget.saturating_sub(gate.count)),
             "active":gate.active.iter().sum::<usize>(),"api_active":gate.active[0],"media_active":gate.active[1],
             "peak_active":gate.peak_total,"peak_api_active":gate.peak_active[0],"peak_media_active":gate.peak_active[1],
             "rate_wait_seconds":gate.waiting.as_secs_f64(),"admission_wait_seconds_sum":gate.admission_wait.as_secs_f64(),
@@ -937,9 +934,16 @@ mod tests {
     }
     #[test]
     fn rejection_latches_before_another_request() {
-        for status in [302, 401, 403, 429] {
+        for (status, budget) in [
+            (302, 10),
+            (401, 10),
+            (403, 10),
+            (429, 10),
+            (403, 0),
+            (429, 0),
+        ] {
             let (url, server) = server(status, "blocked", 1);
-            let client = client(10);
+            let client = client(budget);
             assert!(matches!(
                 client.open_validated(url.clone(), false),
                 Err(Error::Stop(_))
@@ -1184,6 +1188,33 @@ mod tests {
         assert!(
             Online::with_profile(1.0, MAX_REQUEST_BUDGET, 1024, Arc::default(), true, 2.0).is_ok()
         );
+    }
+    #[test]
+    fn zero_budget_admits_requests_past_finite_maximum_and_remains_cancellable() {
+        let client = client(0);
+        client.gate.lock().unwrap().count = MAX_REQUEST_BUDGET;
+        drop(client.admit(false).unwrap());
+        assert_eq!(client.requests(), MAX_REQUEST_BUDGET + 1);
+        assert!(!client.exhausted());
+        assert_eq!(client.stop_reason(), None);
+        assert!(client.metrics()["requests_remaining"].is_null());
+        client.cancel();
+        assert!(matches!(client.admit(false), Err(Error::Stop(_))));
+        assert_eq!(client.stop_reason(), Some(StopReason::UserCancel));
+
+        let fixture = Fixture::with_budget(DEMO, Arc::default(), 0).unwrap();
+        fixture.count.store(MAX_REQUEST_BUDGET, Ordering::SeqCst);
+        fixture.api("/ajax/novel/1004", &[]).unwrap();
+        assert_eq!(fixture.requests(), MAX_REQUEST_BUDGET + 1);
+        assert!(!fixture.exhausted());
+        assert!(fixture.metrics()["requests_remaining"].is_null());
+        fixture.cancel();
+        assert!(matches!(
+            fixture.api("/ajax/novel/1004", &[]),
+            Err(Error::Stop(_))
+        ));
+        assert_eq!(fixture.stop_reason(), Some(StopReason::UserCancel));
+        assert!(Online::with_profile(1.0, 0, 1024, Arc::default(), true, 2.0).is_ok());
     }
     #[test]
     fn fixture_cancel_query_encoding_and_atomic_budget() {

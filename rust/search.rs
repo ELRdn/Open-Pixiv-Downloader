@@ -17,6 +17,66 @@ enum RangeTask {
     },
 }
 
+fn normalize(url: &Url) -> Result<Url> {
+    let path = url.path().strip_prefix("/en").unwrap_or(url.path());
+    if path.trim_end_matches('/') != "/search" {
+        return Ok(url.clone());
+    }
+    let pairs: Vec<_> = url.query_pairs().collect();
+    let parameter = |name| {
+        let values: Vec<_> = pairs.iter().filter(|(key, _)| key == name).collect();
+        if values.len() != 1 || values[0].1.trim().is_empty() {
+            return Err(invalid(&format!(
+                "Supply exactly one search parameter: {name}"
+            )));
+        }
+        Ok(values[0].1.as_ref())
+    };
+    let word = parameter("q")?;
+    if word.chars().any(char::is_control) || word == "." || word.contains("..") {
+        return Err(invalid("Invalid search query"));
+    }
+    if pairs.iter().any(|(key, _)| key == "word") {
+        return Err(invalid("Use q alone for the /search query"));
+    }
+    if parameter("type")? != "novel" {
+        return Err(invalid("/search currently requires type=novel"));
+    }
+    let mut normalized = url.clone();
+    normalized.set_path("/tags/");
+    normalized
+        .path_segments_mut()
+        .map_err(|_| invalid("Invalid search URL"))?
+        .pop_if_empty()
+        .push(word)
+        .push("novels");
+    normalized.set_query(None);
+    {
+        let mut query = normalized.query_pairs_mut();
+        for (key, value) in &pairs {
+            if matches!(key.as_ref(), "q" | "type") {
+                continue;
+            }
+            let value = if key == "s_mode" {
+                match value.as_ref() {
+                    "tag_tc" => "s_tag",
+                    "tag" => "s_tag_only",
+                    "tag_full" => "s_tag_full",
+                    "text" => "s_tc",
+                    other => other,
+                }
+            } else {
+                value.as_ref()
+            };
+            query.append_pair(key, value);
+        }
+        if !pairs.iter().any(|(key, _)| key == "s_mode") {
+            query.append_pair("s_mode", "s_tag_full");
+        }
+    }
+    Ok(normalized)
+}
+
 fn parts(url: &Url) -> Result<(&str, &str)> {
     let path = url.path().strip_prefix("/en").unwrap_or(url.path());
     let mut parts = path.trim_end_matches('/').split('/');
@@ -37,7 +97,8 @@ fn parts(url: &Url) -> Result<(&str, &str)> {
 }
 
 pub fn validate(url: &Url) -> Result<()> {
-    parts(url)?;
+    let url = normalize(url)?;
+    parts(&url)?;
     let mut seen = HashSet::new();
     for (key, value) in url.query_pairs() {
         if !seen.insert(key.clone()) {
@@ -124,7 +185,7 @@ pub fn discover_with(
     mut fetch: impl FnMut(&str, &[(&str, String)], &str) -> Result<Value>,
     mut progress: impl FnMut(String),
 ) -> Result<Vec<Target>> {
-    let url = Url::parse(source).map_err(|_| invalid("Invalid search URL"))?;
+    let url = normalize(&Url::parse(source).map_err(|_| invalid("Invalid search URL"))?)?;
     validate(&url)?;
     let (tag, category) = parts(&url)?;
     // Preserve path characters that would otherwise change form-query parsing.
@@ -292,7 +353,9 @@ pub fn discover_with(
                         .ok_or_else(|| invalid("Missing tag-search total"))?;
                     expected = expected.max(total);
                     if expected > MAX_WORKS as u64 {
-                        return Err(invalid("Search exceeds 1000000 works; narrow the search"));
+                        return Err(invalid(&format!(
+                            "Search has {expected} works, exceeding the {MAX_WORKS} work limit; narrow the search"
+                        )));
                     }
                     let before = page_seen.len();
                     for item in entries {
@@ -353,7 +416,9 @@ pub fn discover_with(
                     }
                 }
                 if refs.len() > MAX_WORKS {
-                    return Err(invalid("Search exceeds 1000000 works; narrow the search"));
+                    return Err(invalid(&format!(
+                        "Search exceeds {MAX_WORKS} works; narrow the search"
+                    )));
                 }
                 continue;
             }
@@ -375,7 +440,7 @@ pub fn discover_with(
                     .pred_opt()
                     .ok_or_else(|| invalid("Search date underflow"))?
             } else {
-                return Err(invalid(&format!("Search incomplete on {first}: found {} of {expected} {kind} works within the accessible page range. Narrow this day's search", found.len())));
+                return Err(invalid(&format!("Search incomplete on {first}: found {} of {expected} {kind} works within the accessible page range, even in both date orders. Anonymous search cannot enumerate this crowded day completely; narrow the source search. No complete selection was accepted", found.len())));
             };
             if start.is_some_and(|start| split < start) || end.is_some_and(|end| split >= end) {
                 return Err(invalid("Search date split made no progress"));
@@ -463,6 +528,62 @@ mod tests {
             false
         }
         fn cancel(&self) {}
+    }
+
+    #[test]
+    fn query_search_maps_modes_and_keeps_filters_and_literal_keywords() {
+        for (mode, expected) in [
+            ("tag_tc", "s_tag"),
+            ("tag", "s_tag_only"),
+            ("tag_full", "s_tag_full"),
+            ("text", "s_tc"),
+            ("s_tc", "s_tc"),
+        ] {
+            let client = Search {
+                pages: vec![json!({"novel":{"data":[{"id":"1004"}],"total":1}})],
+                ..Default::default()
+            };
+            let refs = discover(
+                &client,
+                &format!("https://www.pixiv.net/search?q=R18&s_mode={mode}&type=novel&p=3&work_lang=ja&r=1"),
+                "all",
+            )
+            .unwrap();
+            assert_eq!(refs, vec![Target::new("novel", "1004").unwrap()]);
+            let calls = client.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, "/ajax/search/novels/R18");
+            for (key, value) in [
+                ("word", "R18"),
+                ("s_mode", expected),
+                ("mode", "safe"),
+                ("p", "1"),
+                ("work_lang", "ja"),
+                ("r", "1"),
+            ] {
+                assert!(calls[0].1.contains(&(key.into(), value.into())));
+            }
+            assert!(!calls[0]
+                .1
+                .iter()
+                .any(|(key, _)| matches!(key.as_str(), "q" | "type")));
+        }
+        for word in ["猫 + 犬", "C++", "a/b&c?d#e%20", "R18 -漫画"] {
+            let mut url = Url::parse("https://www.pixiv.net/en/search").unwrap();
+            url.query_pairs_mut()
+                .append_pair("q", word)
+                .append_pair("type", "novel");
+            let client = Search {
+                pages: vec![json!({"novel":{"data":[],"total":0}})],
+                ..Default::default()
+            };
+            discover(&client, url.as_str(), "all").unwrap();
+            let calls = client.calls.lock().unwrap();
+            assert!(calls[0].1.contains(&("word".into(), word.into())));
+            assert!(calls[0].1.contains(&("s_mode".into(), "s_tag_full".into())));
+            assert!(calls[0].0.starts_with("/ajax/search/novels/"));
+            assert!(!calls[0].0["/ajax/search/novels/".len()..].contains(['/', '?', '#']));
+        }
     }
 
     #[test]

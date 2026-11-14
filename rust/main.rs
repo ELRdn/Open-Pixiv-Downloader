@@ -5,6 +5,7 @@ mod folder;
 mod jobs;
 mod media;
 mod novel;
+mod novel_scan;
 mod search;
 mod settings;
 mod target;
@@ -54,6 +55,20 @@ enum Command {
     Plan(FetchArgs),
     /// Save works with checksums and resumable state
     Fetch(FetchArgs),
+    /// Check a pinned novel ID range in small batches; save only public, all-ages body TXT
+    ScanNovels {
+        #[command(flatten)]
+        args: FetchArgs,
+        /// First ID to check (default: 1 for a new scan)
+        #[arg(long, conflicts_with = "resume")]
+        first_id: Option<u64>,
+        /// Inclusive upper ID observed at the start; required for a new scan
+        #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+        last_id: Option<u64>,
+        /// Prepare the pinned range without making any work requests
+        #[arg(long, conflicts_with = "resume")]
+        prepare_only: bool,
+    },
     /// Verify saved checksums without network access
     Verify { out: PathBuf },
     /// Collect saved images and plain novel text into works/image and works/novel
@@ -63,7 +78,7 @@ enum Command {
 }
 #[derive(Args)]
 struct FetchArgs {
-    /// Work, author, novel-series or tag-search URLs (also art:ID / novel:ID / user:ID / series:ID)
+    /// Work, author, novel-series or search URLs (also art:ID / novel:ID / user:ID / series:ID)
     targets: Vec<String>,
     #[arg(long)]
     input: Option<PathBuf>,
@@ -96,7 +111,8 @@ struct FetchArgs {
     /// Resume the saved job targets instead of discovering the author again
     #[arg(long)]
     resume: bool,
-    #[arg(long, default_value_t = 20_000, value_parser = clap::value_parser!(u32).range(1..=transport::MAX_REQUEST_BUDGET as i64))]
+    /// Request limit for this invocation; 0 means unlimited (default: 20000)
+    #[arg(long, default_value_t = 20_000, value_parser = clap::value_parser!(u32).range(0..=transport::MAX_REQUEST_BUDGET as i64))]
     request_budget: u32,
     #[arg(long, default_value_t = 256)]
     max_file_mib: u64,
@@ -127,6 +143,7 @@ impl From<FetchArgs> for Options {
             max_file_mib: a.max_file_mib,
             retry_unavailable: a.retry_unavailable,
             text_only: a.text_only,
+            novel_scan: false,
         }
     }
 }
@@ -157,6 +174,18 @@ fn execute() -> error::Result<i32> {
     let result = match cli.command.unwrap() {
         Command::Plan(args) => jobs::run(args.into(), true, stop.clone(), |_| {})?,
         Command::Fetch(args) => jobs::run(args.into(), false, stop.clone(), |_| {})?,
+        Command::ScanNovels {
+            args,
+            first_id,
+            last_id,
+            prepare_only,
+        } => {
+            if prepare_only {
+                novel_scan::prepare(args.into(), first_id, last_id)?
+            } else {
+                novel_scan::run(args.into(), first_id, last_id, stop.clone(), |_| {})?
+            }
+        }
         Command::Verify { out } => archive::Archive::open(&out, true)?.verify()?,
         Command::Collect { out } => {
             archive::Archive::open(&out, true)?.collect(&|| stop.load(Ordering::SeqCst))?
@@ -196,6 +225,35 @@ fn main() {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    #[test]
+    fn novel_scan_requires_a_pinned_upper_bound_or_explicit_resume() {
+        for args in [
+            vec![
+                "opixiv",
+                "scan-novels",
+                "https://www.pixiv.net/novel",
+                "--last-id",
+                "29631368",
+                "--online",
+            ],
+            vec!["opixiv", "scan-novels", "--resume", "--online"],
+        ] {
+            assert!(matches!(
+                Cli::try_parse_from(args).unwrap().command,
+                Some(Command::ScanNovels { .. })
+            ));
+        }
+        assert!(Cli::try_parse_from(["opixiv", "scan-novels", "--online"]).is_err());
+        assert!(Cli::try_parse_from([
+            "opixiv",
+            "scan-novels",
+            "--resume",
+            "--last-id",
+            "100",
+            "--online"
+        ])
+        .is_err());
+    }
     #[test]
     fn update_cli_supports_check_and_force_as_separate_modes() {
         for args in [
@@ -257,7 +315,7 @@ mod cli_tests {
         );
     }
     #[test]
-    fn resume_accepts_no_targets_and_budget_is_finite() {
+    fn resume_accepts_no_targets_and_zero_budget_is_unlimited() {
         let resumed = options(&[
             "opixiv",
             "fetch",
@@ -269,7 +327,16 @@ mod cli_tests {
         assert!(resumed.resume);
         assert!(resumed.targets.is_empty());
         assert_eq!(resumed.request_budget, 20_000);
-        for value in ["0", "1000001"] {
+        let unlimited = options(&[
+            "opixiv",
+            "fetch",
+            "--resume",
+            "--online",
+            "--request-budget",
+            "0",
+        ]);
+        assert_eq!(unlimited.request_budget, 0);
+        for value in ["-1", "1000001"] {
             assert!(Cli::try_parse_from([
                 "opixiv",
                 "fetch",

@@ -117,6 +117,11 @@ fn str_at<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 pub fn discover(client: &dyn Transport, target: &Target, types: &str) -> Result<Vec<Target>> {
+    if target.kind == "novel_scan" {
+        return Err(invalid(
+            "Initialize the ID range with opixiv scan-novels --last-id ID",
+        ));
+    }
     if target.kind == "search" {
         return crate::search::discover(client, &target.id, types);
     }
