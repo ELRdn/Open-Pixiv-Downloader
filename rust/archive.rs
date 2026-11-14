@@ -314,9 +314,7 @@ impl Archive {
                 client,
                 &target.id,
                 types,
-                |path, query, node| {
-                    self.cached_discovery_api(client, &scope, path, query, Some(node))
-                },
+                |path, query, node| self.cached_discovery_api(client, &scope, path, query, node),
                 progress,
             )
         } else {
@@ -357,9 +355,29 @@ impl Archive {
             if cached.len() > 16 * 1024 * 1024 {
                 return Err(invalid("Saved search page exceeds 16 MiB"));
             }
-            return Ok(serde_json::from_str(&cached)?);
+            let cached: Value = serde_json::from_str(&cached)?;
+            let needs_tags = node.is_some_and(|name| {
+                cached[name]["data"].as_array().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item["isAdContainer"] != true && item.get("tags").is_none())
+                })
+            });
+            if !needs_tags {
+                return Ok(cached);
+            }
         }
-        let body = client.api(path, query)?;
+        let novel_metadata = node.is_none()
+            && path
+                .strip_prefix("/ajax/novel/")
+                .is_some_and(crate::target::valid_id);
+        let body = match client.api(path, query) {
+            Ok(body) => body,
+            Err(Error::Missing { .. } | Error::Unavailable(_)) if novel_metadata => {
+                json!({"missing":true})
+            }
+            Err(error) => return Err(error),
+        };
         let compact = if let Some(node) = node {
             let page = &body[node];
             let entries = page["data"]
@@ -368,14 +386,20 @@ impl Archive {
             let total = page["total"]
                 .as_u64()
                 .ok_or_else(|| invalid("Missing tag-search total"))?;
-            // Resume needs only IDs and dates, not search captions or user profiles.
+            // Resume needs IDs, dates and split tags, without captions or user profiles.
             json!({node:{"total":total,"lastPage":page["lastPage"],"data":entries.iter().map(|item|
-                json!({"id":item["id"],"createDate":item["createDate"],"isAdContainer":item["isAdContainer"]})).collect::<Vec<_>>()}})
+                json!({"id":item["id"],"createDate":item["createDate"],"tags":item["tags"],"isAdContainer":item["isAdContainer"]})).collect::<Vec<_>>()}})
+        } else if novel_metadata {
+            if body["missing"] == true {
+                body
+            } else {
+                json!({"id":body["id"],"createDate":body["createDate"],"tags":body["tags"],"isOriginal":body["isOriginal"],"xRestrict":body["xRestrict"]})
+            }
         } else {
             body
         };
         self.db.lock().unwrap().execute(
-            "INSERT INTO search_pages VALUES (?1,?2,?3)",
+            "INSERT OR REPLACE INTO search_pages VALUES (?1,?2,?3)",
             params![scope, request, serde_json::to_string(&compact)?],
         )?;
         Ok(compact)
@@ -1637,6 +1661,44 @@ pub type SharedArchive = Arc<Archive>;
 mod tests {
     use super::*;
     use crate::transport::{Fixture, DEMO};
+    #[test]
+    fn legacy_search_cache_without_tags_is_upgraded_once_for_keyword_splitting() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let path = "/ajax/search/novels/test";
+        let query: &[(&str, String)] = &[];
+        let request = serde_json::to_string(&(path, query)).unwrap();
+        archive.db.lock().unwrap().execute("INSERT INTO search_pages VALUES (?1,?2,?3)",
+            params!["scope", request, json!({"novel":{"total":1,"data":[{"id":"1004","createDate":"2024-01-01T00:00:00+09:00"}]}}).to_string()]).unwrap();
+        let mut data: Value = serde_json::from_str(DEMO).unwrap();
+        data["responses"][path] = json!({"novel":{"total":1,"data":[{"id":"1004","createDate":"2024-01-01T00:00:00+09:00","tags":["test"]}]}});
+        let client = Fixture::with_budget(&data.to_string(), Arc::default(), 1).unwrap();
+        for _ in 0..2 {
+            let page = archive
+                .cached_discovery_api(&client, "scope", path, query, Some("novel"))
+                .unwrap();
+            assert_eq!(page["novel"]["data"][0]["tags"], json!(["test"]));
+            assert_eq!(client.requests(), 1);
+        }
+    }
+    #[test]
+    fn gap_metadata_cache_omits_body_and_reuses_missing_ids_without_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(temp.path(), false).unwrap();
+        let client = Fixture::with_budget(DEMO, Arc::default(), 2).unwrap();
+        for _ in 0..2 {
+            let body = archive
+                .cached_discovery_api(&client, "scope", "/ajax/novel/1004", &[], None)
+                .unwrap();
+            assert_eq!(body["id"], "1004");
+            assert!(body.get("content").is_none());
+            let missing = archive
+                .cached_discovery_api(&client, "scope", "/ajax/novel/9999", &[], None)
+                .unwrap();
+            assert_eq!(missing["missing"], true);
+            assert_eq!(client.requests(), 2);
+        }
+    }
     struct BudgetTransport {
         fixture: Fixture,
         budget: usize,

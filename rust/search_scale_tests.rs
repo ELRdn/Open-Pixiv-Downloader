@@ -20,6 +20,10 @@ struct CappedSearch {
     step_days: i64,
     clamp_year: bool,
     page_size: usize,
+    tag_bits: usize,
+    overlap_keywords: bool,
+    hidden_ids: HashSet<usize>,
+    detail_calls: Mutex<Vec<u64>>,
     calls: Mutex<Vec<Call>>,
 }
 
@@ -41,6 +45,10 @@ impl CappedSearch {
             step_days: 1,
             clamp_year: false,
             page_size: 30,
+            tag_bits: 0,
+            overlap_keywords: false,
+            hidden_ids: HashSet::new(),
+            detail_calls: Mutex::default(),
             calls: Mutex::default(),
         }
     }
@@ -68,7 +76,24 @@ impl CappedSearch {
 
 impl Transport for CappedSearch {
     fn api(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
-        assert_eq!(path, "/ajax/search/novels/scale", "discovery only");
+        if let Some(id) = path.strip_prefix("/ajax/novel/") {
+            let id: u64 = id.parse().unwrap();
+            self.detail_calls.lock().unwrap().push(id);
+            if id == 0 || id > self.total as u64 {
+                return Ok(json!({"missing":true}));
+            }
+            let index = id as usize - 1;
+            let mut tags = vec![json!({"tag":"scale"})];
+            tags.extend(
+                (0..self.tag_bits)
+                    .filter(|bit| (index & (1 << bit)) != 0)
+                    .map(|bit| json!({"tag":format!("partition{bit}")})),
+            );
+            return Ok(
+                json!({"id":id.to_string(),"createDate":self.create_dates[index / self.per_day],"tags":{"tags":tags},"xRestrict":0,"isOriginal":false}),
+            );
+        }
+        assert!(path.starts_with("/ajax/search/novels/"), "discovery only");
         let parameter = |name| {
             query
                 .iter()
@@ -116,19 +141,40 @@ impl Transport for CappedSearch {
             )
         };
         let total = hi.saturating_sub(lo);
+        let word = parameter("word").unwrap_or("scale");
+        let selected = (self.tag_bits > 0 && word != "scale").then(|| {
+            (lo..hi)
+                .filter(|index| {
+                    word.split_whitespace().all(|term| {
+                        let term = term.trim_matches(['(', ')']);
+                        let (tag, negative) = term
+                            .strip_prefix('-')
+                            .map_or((term, false), |tag| (tag, true));
+                        tag.strip_prefix("partition").is_none_or(|bit| {
+                            let bit: usize = bit.parse().unwrap();
+                            ((*index & (1 << bit)) != 0) != (negative && !self.overlap_keywords)
+                        })
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        let total = selected.as_ref().map_or(total, Vec::len);
         let offset = (page.min(10) - 1) * self.page_size;
         let ascending = parameter("order") == Some("date");
         let data: Vec<_> = (offset..(offset + self.page_size).min(total))
-            .map(|position| {
-                let index = if ascending {
-                    lo + position
+            .filter_map(|position| {
+                let position = if ascending { position } else { total - 1 - position };
+                let index = if let Some(selected) = &selected {
+                    selected[position]
                 } else {
-                    hi - 1 - position
+                    lo + position
                 };
-                json!({
+                if self.hidden_ids.contains(&(index + 1)) { return None; }
+                Some(json!({
                     "id": (index + 1).to_string(),
-                    "createDate": self.create_dates[index / self.per_day]
-                })
+                    "createDate": self.create_dates[index / self.per_day],
+                    "tags":(0..self.tag_bits).filter(|bit| (index & (1 << bit)) != 0).map(|bit| format!("partition{bit}")).collect::<Vec<_>>()
+                }))
             })
             .collect();
         Ok(json!({"novel": {
@@ -141,7 +187,7 @@ impl Transport for CappedSearch {
     }
 
     fn requests(&self) -> usize {
-        self.calls.lock().unwrap().len()
+        self.calls.lock().unwrap().len() + self.detail_calls.lock().unwrap().len()
     }
 
     fn stopped(&self) -> bool {
@@ -227,6 +273,49 @@ fn original_sized_search_over_a_million_still_splits_and_enumerates_every_id() {
         .unwrap()
         .iter()
         .any(|call| call.start.is_some()));
+}
+
+#[test]
+fn crowded_days_split_recursively_by_keywords_without_losing_ids_or_date_order() {
+    for (total, per_day, bits) in [(939, 939, 1), (2400, 2400, 3), (4801, 2400, 3)] {
+        for order in ["date", "date_d"] {
+            let mut client = CappedSearch::new("2024-02-29", total, per_day);
+            client.tag_bits = bits;
+            let targets = discover(&client, &format!("{SOURCE}?order={order}"), "novel").unwrap();
+            assert_ids(&targets, 1..=total, order);
+            client.assert_request_limits();
+        }
+    }
+}
+
+#[test]
+fn keyword_partitions_with_matching_totals_but_overlapping_ids_are_rejected() {
+    let mut client = CappedSearch::new("2024-02-29", 1000, 1000);
+    client.tag_bits = 1;
+    client.overlap_keywords = true;
+    let error = discover(&client, SOURCE, "novel").unwrap_err().to_string();
+    assert!(error.contains("changed while splitting"), "{error}");
+}
+
+#[test]
+fn sparse_pages_recover_search_hidden_public_ids_without_changing_date_order() {
+    for (total, bits) in [(200, 0), (524, 0), (939, 3)] {
+        for order in ["date", "date_d"] {
+            let mut client = CappedSearch::new("2024-02-29", total, total);
+            client.tag_bits = bits;
+            client.hidden_ids.extend([30, 150]);
+            let targets = discover(
+                &client,
+                &format!("{SOURCE}?order={order}&scd=2024-02-29&ecd=2024-02-29"),
+                "novel",
+            )
+            .unwrap();
+            assert_ids(&targets, 1..=total, order);
+            let details = client.detail_calls.lock().unwrap();
+            assert!(details.contains(&30) && details.contains(&150));
+            assert_eq!(details.len(), details.iter().collect::<HashSet<_>>().len());
+        }
+    }
 }
 
 #[test]
