@@ -15,3 +15,14 @@
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{transition:none!important;animation:none!important}}
 .hero h1>span{display:inline-block;white-space:nowrap}.recording-image-link{display:block}
 @media(max-width:760px){.hero h1{max-width:100%}}
+.mobile-menu{display:none}
+@media(max-width:760px){
+  .nav{position:relative}
+  .mobile-menu{display:block}
+  .mobile-menu>summary{display:grid;place-items:center;width:44px;height:44px;list-style:none;border:1px solid #35495c;background:#101c29;color:#aebfd0;cursor:pointer;touch-action:manipulation}
+  .mobile-menu>summary::-webkit-details-marker{display:none}
+  .mobile-menu[open]>summary{color:var(--cyan);border-color:var(--cyan)}
+  .mobile-menu[open] nav{position:absolute;z-index:3;top:calc(100% - 1px);left:0;right:0;display:flex;flex-direction:column;gap:0;padding:8px;border:1px solid #35495c;background:#101c29;box-shadow:0 16px 28px #0006}
+  .mobile-menu nav>a{display:flex;align-items:center;min-height:44px;padding:10px 12px;font-size:12px}
+  .mobile-menu nav>a:hover{background:#1a2c40}
+}

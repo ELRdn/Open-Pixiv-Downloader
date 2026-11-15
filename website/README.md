@@ -57,6 +57,8 @@ This is an existing Pages project. Wrangler 4.162.0 delegates creation of new Pa
 - Recordings autoplay and loop without playback bars. One external pause button stops or resumes all four, and switching language preserves the paused state.
 - Reduced-motion preferences and hidden tabs use static PNGs.
 - Tap a recording to open the full-size GIF. On mobile, the complete terminal is scaled to fit.
+- The mobile header menu links to features, installation, FAQ, and GitHub. It closes after choosing a link or pressing Escape.
+- Language changes hide the previous recording until its replacement is decoded. Copy-success feedback and its screen-reader announcement follow the selected language.
 - Install tabs provide a copyable Cargo command and the published Windows x64 download. The guide link follows the selected README language.
 - Playback needs no video player or WASM. The site uses Google Fonts with system fallbacks.
 

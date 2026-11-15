@@ -1,4 +1,5 @@
 import './style.css';
+import {setRecordingImageSource} from './recording-image';
 
 const REPO='https://github.com/ELRdn/Open-Pixiv-Downloader';
 const OPIXIV_VERSION='0.3.0-alpha.1';
@@ -7,7 +8,7 @@ const COMMAND=`cargo install --git ${REPO}.git --branch main --locked --force`;
 const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
 let paused=reducedMotion.matches;
 const ja={
-  skip:'本文へ移動',features:'機能',install:'導入する',faq:'FAQ',
+  skip:'本文へ移動',features:'機能',install:'導入する',faq:'FAQ',menu:'メニュー',
   title:'好きな作品を、まとめて手元に。',lead:'作者・タグ・複数URLから、イラストと小説をまとめて保存。',
   heroCaption:'Windows実TUI / 合成4作品の一覧表示と、保存済み状態からの再開',
   full:'録画データを見る ↗',expand:'原寸GIFを見る ↗',pause:'一時停止',play:'再生する',mobileHint:'TUIは原寸GIFでも確認できます。機能の画像はタップで拡大。',
@@ -34,7 +35,7 @@ const ja={
 };
 type Key=keyof typeof ja;
 const en:Record<Key,string>={
-  skip:'Skip to content',features:'Features',install:'Get started',faq:'FAQ',
+  skip:'Skip to content',features:'Features',install:'Get started',faq:'FAQ',menu:'Menu',
   title:'Your favorites. Saved together.',lead:'Batch-save illustrations and novels from creators, tags, or multiple URLs.',
   heroCaption:'Actual Windows TUI / four synthetic works, listing and resuming an existing archive',
   full:'View recording data ↗',expand:'Full-size GIF ↗',pause:'Pause',play:'Play',mobileHint:'Open the full-size GIF for a closer look. Tap feature images to enlarge.',
@@ -62,12 +63,13 @@ const en:Record<Key,string>={
 let lang:'ja'|'en'=new URLSearchParams(location.search).get('lang')==='en'?'en':'ja';
 const t=(k:Key)=>(lang==='ja'?ja:en)[k];
 const tx=(k:Key,tag='span',cls='')=>`<${tag} class="${cls}" data-i18n="${k}">${t(k)}</${tag}>`;
+const sectionLinks=`<a href="#features" data-i18n="features">${t('features')}</a><a href="#install" data-i18n="install">${t('install')}</a><a href="#faq">FAQ</a>`;
 const recordingPath=(name:string,format:string)=>`./recordings/${name}${lang==='en'?'-en':''}.${format}`;
 const recording=(name:string,hero=false)=>`<figure class="terminal ${hero?'hero-terminal':''}"><div class="terminal-bar"><span><i></i>opixiv <b>— ${name==='hero'?'terminal':name}</b></span><span>v${OPIXIV_VERSION} / WINDOWS / DEMO</span></div><div class="terminal-scroll"><a class="recording-image-link" data-recording-link="${name}" data-recording-format="gif" href="${recordingPath(name,'gif')}" aria-label="View ${name} recording at full size"><img class="recording-image" data-recording-image="${name}" src="${recordingPath(name,paused?'png':'gif')}" alt="Actual opixiv ${OPIXIV_VERSION} ${lang.toUpperCase()} ${name} TUI recording" loading="${hero?'eager':'lazy'}" width="1073" height="651"></a></div><figcaption>${tx(hero?'heroCaption':`f${name==='batch'?1:name==='resume'?2:3}Caption` as Key)}<a data-recording-link="${name}" data-recording-format="cast" href="${recordingPath(name,'cast')}" data-i18n="full">${t('full')}</a>${hero?`<a data-recording-link="hero" data-recording-format="gif" href="${recordingPath('hero','gif')}" data-i18n="expand">${t('expand')}</a>`:''}</figcaption></figure>`;
 
 document.querySelector('#app')!.innerHTML=`
 <a class="skip" href="#main" data-i18n="skip">${t('skip')}</a>
-<header class="nav wrap" id="top"><a class="brand" href="#top" aria-label="OpenPixiv home"><img src="./favicon.svg" alt="" width="23" height="23">openpixiv<span>_</span></a><nav aria-label="Main"><a href="#features" data-i18n="features">${t('features')}</a><a href="#install" data-i18n="install">${t('install')}</a><a href="#faq">FAQ</a></nav><div class="nav-right"><a class="github-pill" href="${REPO}">GitHub ↗</a><div class="languages" role="group" aria-label="Language"><button data-lang="ja" type="button" aria-pressed="${lang==='ja'}">JP</button><span>/</span><button data-lang="en" type="button" aria-pressed="${lang==='en'}">EN</button></div></div></header>
+<header class="nav wrap" id="top"><a class="brand" href="#top" aria-label="OpenPixiv home"><img src="./favicon.svg" alt="" width="23" height="23">openpixiv<span>_</span></a><nav aria-label="Main">${sectionLinks}</nav><div class="nav-right"><a class="github-pill" href="${REPO}">GitHub ↗</a><div class="languages" role="group" aria-label="Language"><button data-lang="ja" type="button" aria-pressed="${lang==='ja'}">JP</button><span>/</span><button data-lang="en" type="button" aria-pressed="${lang==='en'}">EN</button></div><details class="mobile-menu"><summary aria-controls="mobile-navigation">${tx('menu','span','sr-only')}<svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" focusable="false"><path d="M2 4h14M2 9h14M2 14h14" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></summary><nav id="mobile-navigation" aria-label="Mobile">${sectionLinks}<a href="${REPO}">GitHub ↗</a></nav></details></div></header>
 <main id="main"><section class="hero wrap"><div class="hero-eyebrow"><p class="eyebrow"><i></i> OPEN SOURCE. LOCAL ARCHIVE.</p><span>WINDOWS · RUST · CLI + TUI</span></div><h1 data-i18n="title">${t('title')}</h1>${tx('lead','p','hero-lead')}
 <div class="hero-toolbar"><span><span class="live-dot"></span> ACTUAL TERMINAL RECORDING</span><button id="motion" type="button" aria-pressed="false" data-i18n="pause">${t('pause')}</button></div>${recording('hero',true)}${tx('mobileHint','p','mobile-hint')}</section>
 <section class="install wrap" id="install" aria-labelledby="install-title"><div class="install-heading"><p class="eyebrow">01 / INSTALL</p><h2 id="install-title" data-i18n="installTitle">${t('installTitle')}</h2></div><div class="install-command"><div class="tabs" role="tablist" aria-label="Install method"><button id="cargo-tab" type="button" role="tab" aria-selected="true" aria-controls="cargo-panel" tabindex="0">Cargo</button><button id="windows-tab" type="button" role="tab" aria-selected="false" aria-controls="windows-panel" tabindex="-1">Windows</button><span>ALPHA / MIT</span></div><div id="cargo-panel" role="tabpanel" aria-labelledby="cargo-tab"><div class="command-row"><span aria-hidden="true">$</span><code id="install-code">${COMMAND}</code><button id="copy" type="button">${tx('copy')}<span aria-hidden="true">⧉</span></button></div>${tx('requirement','p','install-note')}</div><div id="windows-panel" role="tabpanel" aria-labelledby="windows-tab" hidden>${tx('windows','p')}<a href="${WINDOWS_DOWNLOAD}" data-i18n="release">${t('release')}</a></div><a class="install-guide" href="${REPO}#readme" data-i18n="guide">${t('guide')}</a><p id="copy-status" class="sr-only" role="status"></p></div></section>
@@ -83,7 +85,7 @@ function updateMotion(){motion.textContent=t(paused?'play':'pause');motion.setAt
 function syncMedia(){
   document.querySelectorAll<HTMLImageElement>('[data-recording-image]').forEach(image=>{
     const src=recordingPath(image.dataset.recordingImage!,paused||document.hidden?'png':'gif');
-    if(image.getAttribute('src')!==src)image.src=src;
+    void setRecordingImageSource(image,src);
     image.alt=`Actual opixiv ${OPIXIV_VERSION} ${lang.toUpperCase()} ${image.dataset.recordingImage} TUI recording`;
   });
   document.querySelectorAll<HTMLAnchorElement>('[data-recording-link]').forEach(link=>{link.href=recordingPath(link.dataset.recordingLink!,link.dataset.recordingFormat!);});
@@ -102,7 +104,27 @@ document.querySelectorAll<HTMLButtonElement>('[data-lang]').forEach(el=>el.addEv
 const tabs=[...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 function selectTab(selected:HTMLButtonElement){tabs.forEach(tab=>{const active=tab===selected;tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;document.getElementById(tab.getAttribute('aria-controls')!)!.hidden=!active;});}
 tabs.forEach((tab,index)=>{tab.addEventListener('click',()=>selectTab(tab));tab.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const next=tabs[event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+1)%tabs.length];selectTab(next);next.focus();});});
-document.querySelector('#copy')!.addEventListener('click',async()=>{const status=document.querySelector('#copy-status')!;try{await navigator.clipboard.writeText(COMMAND);document.querySelector('#copy [data-i18n]')!.textContent=t('copied');status.textContent=t('copied');}catch{const range=document.createRange();range.selectNodeContents(document.querySelector('#install-code')!);getSelection()?.removeAllRanges();getSelection()?.addRange(range);status.textContent=t('copyError');}});
+document.querySelector('#copy')!.addEventListener('click',async()=>{
+  const status=document.querySelector<HTMLElement>('#copy-status')!;
+  const label=document.querySelector<HTMLElement>('#copy [data-i18n]')!;
+  try{
+    await navigator.clipboard.writeText(COMMAND);
+    label.dataset.i18n='copied';label.textContent=t('copied');
+    status.dataset.i18n='copied';status.textContent=t('copied');
+  }catch{
+    const range=document.createRange();range.selectNodeContents(document.querySelector('#install-code')!);
+    getSelection()?.removeAllRanges();getSelection()?.addRange(range);
+    label.dataset.i18n='copy';label.textContent=t('copy');
+    status.dataset.i18n='copyError';status.textContent=t('copyError');
+  }
+});
+const mobileMenu=document.querySelector<HTMLDetailsElement>('.mobile-menu')!;
+mobileMenu.querySelectorAll('a').forEach(link=>link.addEventListener('click',()=>{mobileMenu.open=false;}));
+mobileMenu.addEventListener('keydown',event=>{
+  if(event.key==='Escape'&&mobileMenu.open){
+    event.preventDefault();mobileMenu.open=false;mobileMenu.querySelector('summary')!.focus();
+  }
+});
 motion.addEventListener('click',()=>{paused=!paused;syncMedia();});
 reducedMotion.addEventListener('change',event=>{paused=event.matches;syncMedia();});
 document.addEventListener('visibilitychange',syncMedia);
