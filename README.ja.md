@@ -6,7 +6,7 @@
 
 [English](README.md) · **日本語**
 
-[ダウンロード](#導入する) · [最初の保存](#最初の保存まで) · [FAQ](#faq) · [ドキュメント](docs/README.md)
+[LPを見る](https://openpixiv.pages.dev/) · [ダウンロード](#導入する) · [最初の保存](#最初の保存まで) · [FAQ](#faq) · [ドキュメント](docs/README.md)
 
 ![OpenPixiv 0.3.0-alpha.1の日本語TUI：合成4作品の一覧表示と保存済みアーカイブからの再開](website/public/recordings/hero.gif)
 

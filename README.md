@@ -6,7 +6,7 @@ Batch-save illustrations and novels from creators, tags, or multiple URLs. Revie
 
 **English** · [日本語](README.ja.md)
 
-[Download](#install) · [First save](#your-first-save) · [FAQ](#faq) · [Docs](docs/README.md)
+[Live website](https://openpixiv.pages.dev/?lang=en) · [Download](#install) · [First save](#your-first-save) · [FAQ](#faq) · [Docs](docs/README.md)
 
 ![OpenPixiv 0.3.0-alpha.1 English TUI: list four demo works and resume an existing archive](website/public/recordings/hero-en.gif)
 

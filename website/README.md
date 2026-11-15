@@ -4,6 +4,8 @@
 
 A static, bilingual TypeScript + Vite site: actual TUI recording → install → workflow demos → comparison → open-source facts → FAQ. Its colors follow the app's dark background, cyan, and blue.
 
+**Live:** [日本語](https://openpixiv.pages.dev/) · [English](https://openpixiv.pages.dev/?lang=en)
+
 ## Preview locally
 
 Use **Node.js 22.18+**; Node.js 24 LTS is recommended. The test command uses Node's built-in TypeScript support.
@@ -31,7 +33,23 @@ npm run preview
 | Cloudflare Pages | `website` | `npm run build` | `dist` |
 | GitHub Pages | Build from `website` after `npm ci` | `npm run build` | Upload `website/dist` as the Pages artifact |
 
-The build uses `--base=./` so assets work under a repository subpath. Set the host's Node version to 24. Hosting is not activated by a Git push; publishing the site is a separate step.
+The build uses `--base=./` so assets work under a repository subpath. Set the host's Node version to 24.
+
+### Production deployment
+
+Published on 2026-11-15 at **https://openpixiv.pages.dev**, using Cloudflare Pages [Direct Upload](https://developers.cloudflare.com/pages/get-started/direct-upload/). The Pages project is `openpixiv`, with production branch `main`; `wrangler.jsonc` records the target and build-output directory.
+
+After authenticating with the intended Cloudflare account, run from `website/`:
+
+```sh
+npm test
+npm run build
+npm exec --yes --package=wrangler@4.162.0 -- wrangler pages deploy dist --project-name openpixiv --branch main
+```
+
+For API-token authentication, supply `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` through the environment. Keep their values out of source control. The token needs Pages write access to the target account.
+
+This is an existing Pages project. Wrangler 4.162.0 delegates creation of new Pages projects by agents to Workers automatically, so new-project setup needs separate verification of the target product. The command above updates the verified Pages project directly. GitHub pushes run CI; they do not automatically deploy this Direct Upload project.
 
 ## Language and playback
 
@@ -77,5 +95,7 @@ Local capture tools and fixture archives stay in the ignored `recording-work/` d
 The media test checks all eight casts for version, language, dimensions, chronological events, terminal color output, and absence of credential patterns; it also checks GIF/PNG signatures and infinite GIF looping.
 
 Browser checks cover Japanese/English at 1280px and 390px widths, overflow, install tabs, copy feedback, autoplay/pause, paused-language switching, reduced motion, and direct English access. Physical phones and screen-reader acceptance have not been tested.
+
+Production checks on 2026-11-15 confirmed HTTP 200, matching SHA-256 hashes for all 28 deployed files, Japanese/English media switching, copy feedback, download/guide links, direct English access, and no horizontal overflow at 390px. The browser console reported no warnings or errors.
 
 Public facts were checked on **2026-11-15**: GitHub Star 1, MIT, and the v0.3.0-alpha.1 prerelease with Windows x64 / Linux x64 binaries and SHA256SUMS. Before publishing a new version, update the facts and download links together with the recordings. Do not infer current release availability from an older snapshot.
