@@ -56,4 +56,5 @@ jobs:
             NOTICE.md
             LICENSES/
             README.md
+            README.ja.md
           if-no-files-found: error

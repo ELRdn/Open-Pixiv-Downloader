@@ -1,0 +1,16 @@
+{
+  "name": "openpixiv-website",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build --base=./",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}

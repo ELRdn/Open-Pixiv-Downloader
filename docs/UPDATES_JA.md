@@ -1,5 +1,9 @@
 # ツールの更新
 
+[日本語README](../README.ja.md) · [ドキュメント一覧](README.md)
+
+**配布版だけで使う方：** [Releases](https://github.com/ELRdn/Open-Pixiv-Downloader/releases)から新版をダウンロード・展開し、新しい実行ファイルを起動してください。保存先はこれまでと同じフォルダーを指定します。以下の `opixiv update` はRust/CargoとGitを使う自己更新の方法です。
+
 alpha.6以降は、PowerShellで次を実行して更新する。
 
 ```powershell
