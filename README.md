@@ -1,4 +1,4 @@
-# OpenPixiv
+# <img src="website/public/favicon.svg" width="32" height="32" alt=""> OpenPixiv
 
 ### Your favorites. Saved together.
 
@@ -19,7 +19,7 @@ Batch-save illustrations and novels from creators, tags, or multiple URLs. Revie
 | Platform | Download | Launch |
 | --- | --- | --- |
 | Windows x64 | [Download ZIP](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-windows-x86_64.zip) | `.\opixiv.exe` in PowerShell |
-| Linux x64 | [Download tar.gz](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-linux-x86_64.tar.gz) | `./opixiv` |
+| Linux x64 (glibc 2.39+) | [Download tar.gz](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-linux-x86_64.tar.gz) | `./opixiv` |
 
 [Release notes & checksums](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/tag/v0.3.0-alpha.1) · Alpha software; Windows is the primary development platform.
 

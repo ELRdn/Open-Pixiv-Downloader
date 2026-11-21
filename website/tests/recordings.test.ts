@@ -10,9 +10,11 @@ test('actual terminal recordings are complete, chronological and safe to embed',
     assert.equal(header.env.SHELL,'opixiv 0.3.0-alpha.1');assert.equal(header.env.LANG,language);
     assert.equal(header.theme.palette.split(':').length,16);
     const gif=readFileSync(new URL(`../public/recordings/${name}.gif`,import.meta.url));
-    assert.equal(gif.toString('ascii',0,6),'GIF89a');assert.ok(gif.readUInt16LE(6)>1000&&gif.readUInt16LE(8)>600);
+    assert.equal(gif.toString('ascii',0,6),'GIF89a');
+    assert.deepEqual([gif.readUInt16LE(6),gif.readUInt16LE(8)],[1073,651]);
     const loop=gif.indexOf(Buffer.from('NETSCAPE2.0'));assert.ok(loop>=0);assert.equal(gif.readUInt16LE(loop+13),0,'GIF must loop indefinitely');
     const png=readFileSync(new URL(`../public/recordings/${name}.png`,import.meta.url));assert.equal(png.toString('ascii',1,4),'PNG');
+    assert.deepEqual([png.readUInt32BE(16),png.readUInt32BE(20)],[1073,651]);
     let previous=-1;let stream='';
     for(const line of lines){const [time,kind,data]=JSON.parse(line);assert.ok(Number.isFinite(time)&&time>=previous);assert.equal(kind,'o');assert.equal(typeof data,'string');stream+=data;previous=time;}
     assert.ok(previous>=5&&previous<=10);assert.ok(stream.includes('DEMO'));assert.ok(stream.includes('art_1003')||stream.includes('user:9001'));

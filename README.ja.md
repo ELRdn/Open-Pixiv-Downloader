@@ -1,4 +1,4 @@
-# OpenPixiv
+# <img src="website/public/favicon.svg" width="32" height="32" alt=""> OpenPixiv
 
 ### 好きな作品を、まとめて手元に。
 
@@ -19,7 +19,7 @@
 | 環境 | ダウンロード | 起動 |
 | --- | --- | --- |
 | Windows x64 | [ZIPをダウンロード](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-windows-x86_64.zip) | PowerShellで `.\opixiv.exe` |
-| Linux x64 | [tar.gzをダウンロード](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-linux-x86_64.tar.gz) | `./opixiv` |
+| Linux x64（glibc 2.39以降） | [tar.gzをダウンロード](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-linux-x86_64.tar.gz) | `./opixiv` |
 
 [リリースノート・チェックサム](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/tag/v0.3.0-alpha.1) · Windowsを中心に開発しているα版です。
 

@@ -2,9 +2,11 @@
 
 [English README](../README.md) · [日本語README](../README.ja.md) · [Development](../docs/DEVELOPMENT.md)
 
-A static, bilingual TypeScript + Vite site: actual TUI recording → install → workflow demos → comparison → open-source facts → FAQ. Its colors follow the app's dark background, cyan, and blue.
+A static, bilingual TypeScript + Vite site. The hero pairs the real TUI with the install and demo links. Quick start covers both installation methods and the first offline save. The scenario picker shows how to list works, resume, and inspect output folders.
 
 **Live:** [日本語](https://openpixiv.pages.dev/) · [English](https://openpixiv.pages.dev/?lang=en)
+
+The [three-layer archive mark](public/favicon.svg) is the official OpenPixiv icon. The website and both repository READMEs use this SVG directly. The [GitHub social preview](../.github/social-preview.png) renders the same mark on the site's navy background at 1280 × 640.
 
 ## Preview locally
 
@@ -54,13 +56,13 @@ This is an existing Pages project. Wrangler 4.162.0 delegates creation of new Pa
 ## Language and playback
 
 - JP / EN switches page copy, all four GIFs, their static PNGs, full-size links, and original recording links. `?lang=en` opens English directly.
-- Recordings autoplay and loop without playback bars. One external pause button stops or resumes all four, and switching language preserves the paused state.
+- The hero and the selected scenario autoplay and loop. The playback buttons share one pause state across both players, scene changes, and language changes.
 - Reduced-motion preferences and hidden tabs use static PNGs.
-- Tap a recording to open the full-size GIF. On mobile, the complete terminal is scaled to fit.
-- The mobile header menu links to features, installation, FAQ, and GitHub. It closes after choosing a link or pressing Escape.
-- Language changes hide the previous recording until its replacement is decoded. Copy-success feedback and its screen-reader announcement follow the selected language.
-- Install tabs provide a copyable Cargo command and the published Windows x64 download. The guide link follows the selected README language.
-- Playback needs no video player or WASM. The site uses Google Fonts with system fallbacks.
+- Tap a recording to open the full-size frame in its current playback mode. While paused, the image and expand control open the static PNG. A separate GIF link explicitly opens the animation. On mobile, the complete terminal is scaled to fit.
+- The mobile header menu links to features, installation, FAQ, and GitHub. It closes after choosing a link, pressing Escape, or tabbing out of the menu.
+- Language changes hide the previous recording until its replacement is decoded. Copy feedback and its status announcement follow the selected language, including after a clipboard failure.
+- Windows x64 and Linux x64 download tabs show the matching binary and offline launch command. The copyable Cargo command is adjacent. Guide links follow the selected README language.
+- The archive sleeve and hero lighting use CSS. The site renders with locally available fonts and the original recording assets.
 
 ## Recording provenance
 
@@ -94,10 +96,12 @@ Local capture tools and fixture archives stay in the ignored `recording-work/` d
 
 ## Validation and maintenance
 
+With the production preview running on port 4173, run `python tests/preview-regressions.py` from this directory to check the static installation links, binary requirements, keyboard focus, navigation landmarks, full-size recordings, and history traversal. This browser check uses Python Playwright and Google Chrome.
+
 The media test checks all eight casts for version, language, dimensions, chronological events, terminal color output, and absence of credential patterns; it also checks GIF/PNG signatures and infinite GIF looping.
 
-Browser checks cover Japanese/English at 1280px and 390px widths, overflow, install tabs, copy feedback, autoplay/pause, paused-language switching, reduced motion, and direct English access. Physical phones and screen-reader acceptance have not been tested.
+On 2026-11-21, local Chrome checks covered Japanese and English at 320, 390, 768, 1280, and 1440 CSS pixels. They exercised keyboard navigation, mobile menu dismissal and Escape focus, platform tabs, clipboard success and denial, localized status announcements, FAQ disclosure, scene and language changes, reduced motion, and delayed GIF responses. The installed Windows TUI also produced four works in a fresh offline archive with the documented first-save keys. Physical phones and screen-reader acceptance are unverified.
 
 Production checks on 2026-11-15 confirmed HTTP 200, matching SHA-256 hashes for all 28 deployed files, Japanese/English media switching, copy feedback, download/guide links, direct English access, and no horizontal overflow at 390px. The browser console reported no warnings or errors.
 
-Public facts were checked on **2026-11-15**: GitHub Star 1, MIT, and the v0.3.0-alpha.1 prerelease with Windows x64 / Linux x64 binaries and SHA256SUMS. Before publishing a new version, update the facts and download links together with the recordings. Do not infer current release availability from an older snapshot.
+GitHub Releases listed **v0.3.0-alpha.1** as a prerelease on **2026-11-21**, with Windows x64 and Linux x64 binaries and SHA256SUMS. The version matches the original cast headers. Recheck the release and both asset URLs when updating the recordings.
