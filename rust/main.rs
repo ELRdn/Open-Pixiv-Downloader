@@ -1,5 +1,6 @@
 mod archive;
 mod collection;
+mod conversion;
 mod error;
 mod folder;
 #[macro_use]
@@ -77,6 +78,27 @@ enum Command {
     Collect { out: PathBuf },
     /// Export verified complete works to ZIP
     Pack { out: PathBuf, zip: PathBuf },
+    /// Convert local TXT files without downloading anything
+    ConvertTxt {
+        /// A TXT file or a folder searched recursively
+        source: PathBuf,
+        #[arg(long, value_enum)]
+        format: conversion::Format,
+        /// Output archive path (default: alongside the input)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// 1-based file number or inclusive range, sorted by relative path
+        #[arg(long)]
+        range: Option<conversion::Range>,
+    },
+    /// Restore TXT files into a new folder, offline
+    RestoreTxt {
+        /// A .7z, .tar.zst or OpenPixiv .parquet archive
+        source: PathBuf,
+        /// New output folder (default: alongside the input with a -txt suffix)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 #[derive(Args)]
 struct FetchArgs {
@@ -193,6 +215,19 @@ fn execute() -> error::Result<i32> {
             archive::Archive::open(&out, true)?.collect(&|| stop.load(Ordering::SeqCst))?
         }
         Command::Pack { out, zip } => archive::Archive::open(&out, true)?.pack(&zip)?,
+        Command::ConvertTxt {
+            source,
+            format,
+            out,
+            range,
+        } => run_conversion(&stop, || {
+            conversion::Plan::exporting(&source, out.as_deref(), format, range, &|| {
+                stop.load(Ordering::SeqCst)
+            })
+        })?,
+        Command::RestoreTxt { source, out } => run_conversion(&stop, || {
+            conversion::Plan::restoring(&source, out.as_deref())
+        })?,
         Command::Tui | Command::Update { .. } => unreachable!(),
     };
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -212,6 +247,16 @@ fn execute() -> error::Result<i32> {
             0
         },
     )
+}
+fn run_conversion(
+    stop: &AtomicBool,
+    prepare: impl FnOnce() -> error::Result<conversion::Plan>,
+) -> error::Result<serde_json::Value> {
+    match prepare().and_then(|plan| plan.execute(&|| stop.load(Ordering::SeqCst), |_| {})) {
+        Ok(report) => Ok(serde_json::to_value(report)?),
+        Err(_) if stop.load(Ordering::SeqCst) => Ok(serde_json::json!({"status": "cancelled"})),
+        Err(error) => Err(error),
+    }
 }
 fn main() {
     let code = match execute() {

@@ -37,6 +37,9 @@ use std::{
 };
 use unicode_width::UnicodeWidthStr;
 
+#[path = "tui_conversion.rs"]
+mod conversion_ui;
+
 const INK: Color = Color::Rgb(218, 232, 244);
 const MUTED: Color = Color::Rgb(116, 143, 165);
 const CYAN: Color = Color::Rgb(81, 225, 232);
@@ -349,6 +352,7 @@ struct App {
     modal: Modal,
     modal_scroll: u16,
     worker: Option<Worker>,
+    conversion: Option<conversion_ui::Conversion>,
     rows: Vec<WorkRow>,
     row_index: HashMap<String, usize>,
     body_keys: HashSet<String>,
@@ -404,6 +408,7 @@ impl Default for App {
             modal: Modal::None,
             modal_scroll: 0,
             worker: None,
+            conversion: None,
             rows: vec![],
             row_index: HashMap::new(),
             body_keys: HashSet::new(),
@@ -427,6 +432,44 @@ impl Default for App {
     }
 }
 impl App {
+    fn open_conversion(&mut self) {
+        if self.worker.is_some() {
+            self.log(
+                self.language
+                    .text(
+                        "TXT tools are available after the current job finishes.",
+                        "処理が終わるとTXT変換を開けます。",
+                    )
+                    .into(),
+            );
+            return;
+        }
+        let root = PathBuf::from(self.out.value.trim());
+        let source = if root.as_os_str().is_empty() {
+            PathBuf::new()
+        } else {
+            root.join(if self.text_only {
+                "novel"
+            } else {
+                "works/novel"
+            })
+        };
+        self.conversion = Some(conversion_ui::Conversion::new(root, source));
+    }
+
+    fn paste(&mut self, text: &str) {
+        if let Some(conversion) = &mut self.conversion {
+            conversion.paste(text);
+        } else if self.worker.is_none() && self.modal == Modal::None {
+            match self.focus {
+                0 => self.urls.insert(text, true),
+                1 => self.out.insert(text, false),
+                _ => {}
+            }
+        }
+        self.dirty = true;
+    }
+
     fn open_collection(&mut self, kind: &str) {
         if self.out.value.trim().is_empty() {
             self.log(
@@ -1249,6 +1292,9 @@ impl App {
     }
     fn poll(&mut self) {
         self.poll_update();
+        if let Some(conversion) = &mut self.conversion {
+            self.dirty |= conversion.poll(self.language);
+        }
         let mut events: Vec<_> = self
             .worker
             .as_ref()
@@ -1464,6 +1510,12 @@ impl App {
             return false;
         }
         self.dirty = true;
+        if let Some(conversion) = &mut self.conversion {
+            if conversion.key(key, self.language) {
+                self.conversion = None;
+            }
+            return false;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if self.worker.is_some() {
                 self.cancel();
@@ -1522,6 +1574,12 @@ impl App {
         }
         if key.code == KeyCode::F(10) {
             self.open_settings();
+            return false;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::ALT) {
+            if key.kind == KeyEventKind::Press {
+                self.open_conversion();
+            }
             return false;
         }
         if (key.code == KeyCode::F(11)
@@ -1672,6 +1730,33 @@ impl App {
     }
     fn mouse(&mut self, event: MouseEvent, area: Rect) {
         self.dirty = true;
+        if let Some(conversion) = &mut self.conversion {
+            if let Some(view) = View::new(area) {
+                let point = ratatui::layout::Position::new(event.column, event.row);
+                let region = conversion_area(&view);
+                if region == view.body && conversion.library_focused() {
+                    conversion.library_mouse(event, region, true);
+                } else if region != view.body
+                    && conversion.uses_library()
+                    && view.queue.contains(point)
+                {
+                    conversion.library_mouse(event, view.queue, false);
+                } else if region != view.body
+                    && conversion_button(self.language, view.footer).contains(point)
+                    && event.kind == MouseEventKind::Down(MouseButton::Left)
+                {
+                    if conversion.key(
+                        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
+                        self.language,
+                    ) {
+                        self.conversion = None;
+                    }
+                } else {
+                    conversion.mouse(event, region, self.language);
+                }
+            }
+            return;
+        }
         if self.modal == Modal::Settings {
             if event.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some(view) = View::new(area) {
@@ -1728,6 +1813,10 @@ impl App {
         };
         let point = ratatui::layout::Position::new(event.column, event.row);
         if event.kind == MouseEventKind::Down(MouseButton::Left) {
+            if conversion_button(self.language, view.footer).contains(point) {
+                self.open_conversion();
+                return;
+            }
             if let Some((_, check, details)) = update_controls(view.header) {
                 if check.contains(point) {
                     self.check_update();
@@ -1908,6 +1997,32 @@ impl View {
             large,
         })
     }
+}
+fn input_fields(area: Rect) -> [Rect; 2] {
+    Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(if area.height >= 12 { 6 } else { 3 }),
+    ])
+    .areas(area)
+}
+fn conversion_area(view: &View) -> Rect {
+    let url = input_fields(view.fields)[0];
+    if url.height >= 10 && url.width >= 32 && view.queue.height >= 6 {
+        url
+    } else {
+        view.body
+    }
+}
+fn conversion_label(language: Language) -> &'static str {
+    language.text("[Alt+C TXT tools]", "[Alt+C TXT変換]")
+}
+fn conversion_button(language: Language, footer: Rect) -> Rect {
+    Rect::new(
+        footer.x,
+        footer.y + 2,
+        conversion_label(language).width() as u16,
+        1,
+    )
 }
 fn button_labels(language: Language, footer: Rect) -> (&'static str, &'static str) {
     if footer.width >= 70 {
@@ -2407,22 +2522,20 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             details,
         );
     }
-    let fields = Layout::vertical([
-        Constraint::Min(3),
-        Constraint::Length(if view.fields.height >= 12 { 6 } else { 3 }),
-    ])
-    .split(view.fields);
-    editor(
-        frame,
-        fields[0],
-        &app.urls,
-        app.language.text(
-            "01  URL INPUT · One URL per line",
-            "01  URL INPUT · 1行に1URL",
-        ),
-        app.focus == 0 && app.worker.is_none() && app.modal == Modal::None,
-        "https://www.pixiv.net/artworks/…",
-    );
+    let fields = input_fields(view.fields);
+    if app.conversion.is_none() {
+        editor(
+            frame,
+            fields[0],
+            &app.urls,
+            app.language.text(
+                "01  URL INPUT · One URL per line",
+                "01  URL INPUT · 1行に1URL",
+            ),
+            app.focus == 0 && app.worker.is_none() && app.modal == Modal::None,
+            "https://www.pixiv.net/artworks/…",
+        );
+    }
     if fields[1].height >= 6 {
         let opts =
             Layout::vertical([Constraint::Length(3), Constraint::Length(3)]).split(fields[1]);
@@ -2431,7 +2544,10 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             opts[0],
             &app.out,
             app.language.text("02  Output folder", "02  保存先"),
-            app.focus == 1 && app.worker.is_none() && app.modal == Modal::None,
+            app.focus == 1
+                && app.worker.is_none()
+                && app.modal == Modal::None
+                && app.conversion.is_none(),
             "",
         );
         frame.render_widget(
@@ -2634,14 +2750,27 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
             )),
         foot[0],
     );
-    frame.render_widget(
-        Paragraph::new(app.language.text(
-            "Ctrl+S Save   F10 Settings   F11 Resume   F4 Collect   F1 Help   Esc Quit",
-            "Ctrl+S 保存   F10 設定   F11 再開   F4 集約   F1 ヘルプ   Esc 終了",
-        ))
-        .style(Style::default().fg(MUTED)),
-        foot[2],
-    );
+    frame.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled(conversion_label(app.language), Style::default().fg(CYAN)),
+        Span::styled(if app.conversion.is_some() {
+            app.language.text("   Alt+C Download   Tab Fields   ←/→ Options", "   Alt+C ダウンロード   Tab 項目移動   ←/→ 選択")
+        } else {
+            app.language.text("   Ctrl+S Save   F10 Settings   F11 Resume   F4 Collect   F1 Help   Esc Quit",
+                "   Ctrl+S 保存   F10 設定   F11 再開   F4 集約   F1 ヘルプ   Esc 終了")
+        }, Style::default().fg(MUTED)),
+    ])), foot[2]);
+    if let Some(conversion) = &app.conversion {
+        let region = conversion_area(&view);
+        if region == view.body && conversion.library_focused() {
+            conversion.draw_library(frame, region, app.language);
+        } else {
+            conversion.draw(frame, region, app.language);
+            if region != view.body && conversion.uses_library() {
+                conversion.draw_library(frame, view.queue, app.language);
+            }
+        }
+        return;
+    }
     if app.modal != Modal::None {
         let popup = popup_rect(body, &app.modal);
         if app.modal == Modal::Settings {
@@ -2650,7 +2779,7 @@ fn draw_inner(frame: &mut Frame, app: &App, no_color: bool) {
         }
         frame.render_widget(Clear, popup);
         let text = if app.modal == Modal::Help {
-            app.language.text("Paste URLs, then press Ctrl+S → Enter to save.\nAuthor and search URLs include all successfully listed works.\n\nTab / Shift+Tab: Move between inputs and work list\nF2: Demo ↔ Anonymous online (separate inputs/output)\nF3: Results and missing assets / Up/Down: Scroll\nF4: Collect images/novels / Alt+I or N: Open\nF5: List works (no media downloads)\nF6: Open output / F7: Open selected work\nF8: Check updates / F9: Update instructions\nF10: Save mode, workers, pacing, budget, language (remembered)\nF11 / Ctrl+R: Resume the latest saved selection\nF5 → F11: Save the latest plan without listing again\nF11 also continues a listing paused by budget/cancel.\nIf filters prevent completion, check the source URL.\nCtrl+S: Confirm save / Enter: Start\nAlt+V: Verify / Alt+E: Export to output-export.zip\nWorkers field: Left/Right or 1..8\nList: Up/Down to select / Enter to open folder\nPgUp / PgDn: Move 5 works\nEsc / Ctrl+C: Stop active job; quit when idle\n\nReview results and omissions after saving.\nEnter: New URL line / Up/Down: Scroll / Esc: Close", "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者・タグ検索URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 保存モード・並列・通信・予算・言語（設定を記憶） / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n列挙中の予算切れ・取消もF11で続行。条件による未達は元URLで再確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\n並行数欄: ← → または1〜8\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n保存後は結果と欠損を確認してください。\nEnter: URL改行 / Esc: この画面を閉じる").to_owned()
+            app.language.text("Paste URLs, then press Ctrl+S → Enter to save.\nAuthor and search URLs include all successfully listed works.\n\nTab / Shift+Tab: Move between inputs and work list\nF2: Demo ↔ Anonymous online (separate inputs/output)\nF3: Results and missing assets / Up/Down: Scroll\nF4: Collect images/novels / Alt+I or N: Open\nF5: List works (no media downloads)\nF6: Open output / F7: Open selected work\nF8: Check updates / F9: Update instructions\nF10: Save mode, workers, pacing, budget, language (remembered)\nF11 / Ctrl+R: Resume the latest saved selection\nF5 → F11: Save the latest plan without listing again\nF11 also continues a listing paused by budget/cancel.\nIf filters prevent completion, check the source URL.\nCtrl+S: Confirm save / Enter: Start\nAlt+V: Verify / Alt+E: Export to output-export.zip\nAlt+C: Convert or restore local TXT\nWorkers field: Left/Right or 1..8\nList: Up/Down to select / Enter to open folder\nPgUp / PgDn: Move 5 works\nEsc / Ctrl+C: Stop active job; quit when idle\n\nReview results and omissions after saving.\nEnter: New URL line / Up/Down: Scroll / Esc: Close", "URLを複数貼り付けて、Ctrl+S → Enterで保存します。\n作者・タグ検索URLは列挙できた全作品を対象にします。\n\nTab / Shift+Tab: 入力欄・作品一覧の移動\nF2: デモ ↔ 匿名オンライン（入力・保存先を切替）\nF3: 結果と欠損の詳細 / ↑↓でスクロール\nF4: 画像・小説の集約 / Alt+I・N: 開く\nF5: 対象一覧を確認（媒体は保存しません）\nF6: 保存先を開く / F7: 選択作品を開く\nF8: 更新確認 / F9: 更新方法\nF10: 保存モード・並列・通信・予算・言語（設定を記憶） / F11・Ctrl+R: 保存対象から再開\nF5→F11: 最新の確認対象を再列挙せず保存（以前の保存があっても可）\n列挙中の予算切れ・取消もF11で続行。条件による未達は元URLで再確認\nCtrl+S: 保存確認 / Enter: 開始\nAlt+V: 保存先を検査 / Alt+E: 保存先名-export.zipへ出力\nAlt+C: ローカルTXTを変換・復元\n並行数欄: ← → または1〜8\n一覧で↑↓: 選択 / Enter: フォルダーを開く\nPgUp / PgDn: 5作品ずつ移動\nEsc / Ctrl+C: 実行中は停止、待機中は終了\n\n保存後は結果と欠損を確認してください。\nEnter: URL改行 / Esc: この画面を閉じる").to_owned()
         } else if app.modal == Modal::Collection {
             app.collection_details()
         } else if app.modal == Modal::Update {
@@ -2724,14 +2853,7 @@ pub fn run(automatic_updates: bool) -> Result<()> {
                         let size = terminal.size()?;
                         app.mouse(mouse, Rect::new(0, 0, size.width, size.height));
                     }
-                    InputEvent::Paste(text) if app.worker.is_none() && app.modal == Modal::None => {
-                        app.dirty = true;
-                        match app.focus {
-                            0 => app.urls.insert(&text, true),
-                            1 => app.out.insert(&text, false),
-                            _ => {}
-                        }
-                    }
+                    InputEvent::Paste(text) => app.paste(&text),
                     InputEvent::Resize(_, _) => app.dirty = true,
                     _ => {}
                 }
@@ -2792,6 +2914,86 @@ mod tests {
             output.push('\n');
         }
         output
+    }
+
+    #[test]
+    fn txt_tools_select_saved_files_and_only_write_after_confirmation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("archive");
+        std::fs::create_dir_all(root.join("novel")).unwrap();
+        std::fs::create_dir_all(root.join("works/novel")).unwrap();
+        for name in [
+            "novel/novel_1.txt",
+            "works/novel/novel_2.txt",
+            "works/novel/novel_3.txt",
+        ] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+        let mut app = App::default();
+        app.urls.insert("novel:9001", true);
+        app.out = Editor::new(&root.to_string_lossy());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let alt_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT);
+        app.key(alt_c);
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        fn wait_screen(
+            app: &mut App,
+            terminal: &mut Terminal<TestBackend>,
+            needle: &str,
+        ) -> String {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                app.poll();
+                terminal.draw(|frame| draw(frame, app, false)).unwrap();
+                let text = screen_text(terminal);
+                if text.contains(needle) {
+                    return text;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "Timed out waiting for {needle}:\n{text}"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let text = wait_screen(&mut app, &mut terminal, "works/novel/novel_3.txt");
+        assert!(text.contains("TXT tools · Offline"));
+        let area = Rect::new(0, 0, 120, 36);
+        let queue = View::new(area).unwrap().queue;
+        app.mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: queue.x + 1,
+                row: queue.y + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        );
+        app.key(key(KeyCode::Down));
+        app.key(key(KeyCode::Down));
+        app.key(key(KeyCode::Char(' ')));
+        wait_screen(&mut app, &mut terminal, "2 / 3 TXT selected");
+        let mut compact = Terminal::new(TestBackend::new(34, 12)).unwrap();
+        compact.draw(|frame| draw(frame, &app, false)).unwrap();
+        assert!(screen_text(&compact).contains("[x]"));
+        app.key(key(KeyCode::Enter));
+        wait_screen(&mut app, &mut terminal, "Convert 2 selected TXT");
+        let archive = temp.path().join("archive.7z");
+        assert!(!archive.exists());
+        app.key(key(KeyCode::Enter));
+        wait_screen(&mut app, &mut terminal, "Completed · 2 TXT");
+        let output = temp.path().join("restored");
+        crate::conversion::Plan::restoring(&archive, Some(&output))
+            .unwrap()
+            .execute(&|| false, |_| {})
+            .unwrap();
+        assert!(output.join("novel/novel_1.txt").is_file());
+        assert!(output.join("works/novel/novel_3.txt").is_file());
+        assert!(!output.join("works/novel/novel_2.txt").exists());
+        app.key(alt_c);
+        assert!(app.conversion.is_none());
+        assert_eq!(app.urls.value, "novel:9001");
+        assert!(app.worker.is_none());
     }
     #[test]
     fn english_default_and_f10_language_survive_restart_and_cancel() {

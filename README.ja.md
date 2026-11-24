@@ -18,10 +18,10 @@
 
 | 環境 | ダウンロード | 起動 |
 | --- | --- | --- |
-| Windows x64 | [ZIPをダウンロード](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-windows-x86_64.zip) | PowerShellで `.\opixiv.exe` |
-| Linux x64（glibc 2.39以降） | [tar.gzをダウンロード](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-linux-x86_64.tar.gz) | `./opixiv` |
+| Windows x64 | [ZIPをダウンロード](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.2/opixiv-v0.3.0-alpha.2-windows-x86_64.zip) | PowerShellで `.\opixiv.exe` |
+| Linux x64（glibc 2.39以降） | [tar.gzをダウンロード](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.2/opixiv-v0.3.0-alpha.2-linux-x86_64.tar.gz) | `./opixiv` |
 
-[リリースノート・チェックサム](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/tag/v0.3.0-alpha.1) · Windowsを中心に開発しているα版です。
+[リリースノート・チェックサム](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/tag/v0.3.0-alpha.2) · Windowsを中心に開発しているα版です。
 
 <details>
 <summary>Cargoで導入する・ほかの環境でビルドする</summary>
@@ -62,6 +62,7 @@ Rust版の実行にPythonは不要です。今回のリリースにmacOS用の�
 | 言語・並列数・通信設定を変える | **F10**。**Tab**で移動、**← / →**で切り替え、**Enter**で記憶 |
 | 欠損や停止理由を調べる | **F3** |
 | 保存済みを検査する・ZIPにする | **Alt+V** / **Alt+E** |
+| 小説TXTを変換・復元する | **Alt+C** |
 | 実行を止める・待機中に終了する | **Esc** / **Ctrl+C** |
 
 すべてのキーはアプリ内の **F1**、細かな仕様は[使い方・技術リファレンス](docs/USAGE_JA.md)で確認できます。
@@ -77,6 +78,16 @@ Rust版の実行にPythonは不要です。今回のリリースにmacOS用の�
 
 </details>
 
+## 小説TXTを変換・復元する
+
+**Alt+C** でTXT変換を開きます。保存済み一覧でクリックするか、**Tab** で一覧へ移動し、**Space** で作品を選びます。**Shift+↑/↓** で範囲選択、**Ctrl+A** で全選択できます。一覧には現在の保存先の `novel/` と `works/novel/` にあるTXTが表示されます。
+
+別の場所のTXTを変換するには、入力方法の欄で **←/→** を押して **フォルダー / TXT** を選びます。フォルダー指定ではサブフォルダーも対象です。範囲を空欄にすると全件、`2-10` と入力すると相対パス順の2〜10番を選びます。形式は **7z（高圧縮）**、**tar.zst（高速）**、**Parquet（データセット）** から選べます。**Enter** で対象を確認し、もう一度 **Enter** を押すと実行します。
+
+**TXTへ復元** を選んで変換ファイルを指定すると、元のファイル名とバイト列を新しいフォルダーに復元できます。Parquetの復元はOpenPixivのTXTスキーマ（`relative_path`、バイナリの `content`、`sha256`）に対応します。変換と復元はオフラインで動作し、元ファイルは保持されます。
+
+PPMd方式の `.7z` はOpenPixivか7-Zipで展開してください。Windows標準の `tar.exe` では、PPMdのソリッドアーカイブの展開に失敗することがあります。
+
 ## コマンドで使う
 
 CLIは同じアーカイブを扱い、結果をJSONで返します。以下は通信しないデモです。
@@ -87,6 +98,8 @@ opixiv fetch user:9001 --demo --all --out demo-archive
 opixiv verify demo-archive
 opixiv collect demo-archive
 opixiv pack demo-archive demo-export.zip
+opixiv convert-txt demo-archive/works/novel --format 7z --out novels.7z
+opixiv restore-txt novels.7z --out restored-novels
 ```
 
 引数は `opixiv --help` / `opixiv fetch --help` で確認できます。ダウンロードしたWindows版は、展開先で `opixiv` を `.\opixiv.exe` に読み替えてください。

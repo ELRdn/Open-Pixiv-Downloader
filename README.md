@@ -18,10 +18,10 @@ Batch-save illustrations and novels from creators, tags, or multiple URLs. Revie
 
 | Platform | Download | Launch |
 | --- | --- | --- |
-| Windows x64 | [Download ZIP](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-windows-x86_64.zip) | `.\opixiv.exe` in PowerShell |
-| Linux x64 (glibc 2.39+) | [Download tar.gz](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.1/opixiv-v0.3.0-alpha.1-linux-x86_64.tar.gz) | `./opixiv` |
+| Windows x64 | [Download ZIP](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.2/opixiv-v0.3.0-alpha.2-windows-x86_64.zip) | `.\opixiv.exe` in PowerShell |
+| Linux x64 (glibc 2.39+) | [Download tar.gz](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/download/v0.3.0-alpha.2/opixiv-v0.3.0-alpha.2-linux-x86_64.tar.gz) | `./opixiv` |
 
-[Release notes & checksums](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/tag/v0.3.0-alpha.1) · Alpha software; Windows is the primary development platform.
+[Release notes & checksums](https://github.com/ELRdn/Open-Pixiv-Downloader/releases/tag/v0.3.0-alpha.2) · Alpha software; Windows is the primary development platform.
 
 <details>
 <summary>Build from source with Cargo / other platforms</summary>
@@ -62,6 +62,7 @@ Already know what to save? **Ctrl+S → Enter** starts directly from your URLs. 
 | Adjust language, workers, or pacing | **F10**; **Tab** between fields, **← / →** to change choices, **Enter** to remember |
 | See missing assets or a stop reason | **F3** |
 | Check saved files / export a ZIP | **Alt+V** / **Alt+E** |
+| Convert or restore local novel TXT | **Alt+C** |
 | Stop a running job / close when idle | **Esc** / **Ctrl+C** |
 
 Need all shortcuts? Press **F1** in the app. [Detailed usage reference (日本語)](docs/USAGE_JA.md).
@@ -77,6 +78,16 @@ Open a thumbnail to play its GIF. All three recordings use the actual v0.3.0-alp
 
 </details>
 
+## Convert or restore novel TXT
+
+Press **Alt+C** to open TXT tools. In the saved library, click a file or use **Tab** to focus the list and **Space** to select. **Shift+↑/↓** selects a range, and **Ctrl+A** selects all. The library reads the current archive's `novel/` and `works/novel/` folders.
+
+For other files, choose **Folder / TXT** with **←/→** in the source selector. A folder includes its subfolders. Set an inclusive range like `2-10` to select positions in relative-path order, or leave it blank for all. Pick **7z** for high compression, **tar.zst** for speed, or **Parquet** for dataset tools. Press **Enter** to preview the selection and **Enter** again to start.
+
+Choose **Restore TXT** and enter the archive path to recover the original filenames and bytes into a new folder. Parquet restore requires the OpenPixiv TXT schema (`relative_path`, binary `content`, and `sha256`). Each operation is offline and leaves its inputs in place.
+
+Use OpenPixiv or 7-Zip to extract PPMd `.7z` files. Windows `tar.exe` can fail on solid PPMd archives.
+
 ## Prefer commands?
 
 The CLI returns JSON and supports the same archive. These examples use the offline demo:
@@ -87,6 +98,8 @@ opixiv fetch user:9001 --demo --all --out demo-archive
 opixiv verify demo-archive
 opixiv collect demo-archive
 opixiv pack demo-archive demo-export.zip
+opixiv convert-txt demo-archive/works/novel --format 7z --out novels.7z
+opixiv restore-txt novels.7z --out restored-novels
 ```
 
 Use `opixiv --help` or `opixiv fetch --help` for options. Run `.\opixiv.exe` instead of `opixiv` when using a downloaded Windows binary from its folder.
